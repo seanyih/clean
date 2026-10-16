@@ -1,6 +1,6 @@
 // main.cpp — command line entry: wire the layers together.
 //
-// Layer: driver. Input: `clean <input.c> [-o <output.lean>]` (argv).
+// Layer: driver (lex → parse → sort → emit). Input: `clean <input.c> [-o <output.lean>]` (argv).
 // Output: one .lean file (default: the input path with `.c` → `.lean`), a
 // one-line summary on stdout; diagnostics go to stderr with exit 1 (see
 // diag.h), usage errors exit 2.
@@ -15,6 +15,7 @@
 #include "emitter.h"
 #include "lexer.h"
 #include "parser.h"
+#include "toposort.h"
 
 namespace {
 
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
         const std::string source = readFile(in);
         LexResult lexed = lex(source, baseName(in));
         TranslationUnit unit = parse(lexed.tokens, lexed.definedNames, baseName(in));
+        sortDefinitions(unit);
         writeFile(out, emit(unit));
         std::cout << "clean: wrote " << out << " (" << unit.functions.size()
                   << " definition(s))\n";

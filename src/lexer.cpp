@@ -104,6 +104,7 @@ struct Lexer {
     Token blockComment() {
         Token t;
         t.kind = Token::Kind::Comment;
+        t.block = true;
         t.loc = {line, col};
         step();
         step();  // '/*'
@@ -136,6 +137,20 @@ struct Lexer {
                 t.text += cur();
                 step();
             }
+        } else if (cur() == '0' && (peekAt(1) == 'b' || peekAt(1) == 'B')) {
+            t.text += '0';  // Lean spells it `0b…`; normalise the prefix to lower case
+            step();
+            t.text += 'b';
+            step();
+            if (cur() != '0' && cur() != '1')
+                fail(line, col, "binary literal has no digits", "write e.g. `0b1010`.");
+            while (cur() == '0' || cur() == '1') {
+                t.text += cur();
+                step();
+            }
+            if (isDigit(cur()))
+                fail(line, col, "binary literal contains a digit other than 0 or 1",
+                     "fix the literal.");
         } else {
             while (isDigit(cur())) {
                 t.text += cur();

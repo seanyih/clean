@@ -9,6 +9,8 @@
 
 #include "emitter.h"
 
+#include <vector>
+
 namespace {
 
 std::string trimBlank(const std::string& s) {  // small twin of the lexer's; not worth sharing
@@ -83,17 +85,29 @@ void emitExpr(const Expr& e, std::string& out) {
     }
 }
 
+// Comments above a definition. `//` → `--` lines; `/* */` → `/- -/`.
+// Lean block comments nest, so a C comment that itself contains `/-` or `-/`
+// would corrupt the output; those fall back to `--` lines.
 void emitComments(const Function& f, std::string& out) {
-    for (const std::string& c : f.comments) {
-        size_t start = 0;  // a /* */ comment may span lines; each line becomes one `--` line
-        while (start <= c.size()) {
-            size_t nl = c.find('\n', start);
-            std::string line =
-                c.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
-            line = trimBlank(line);
-            if (!line.empty()) out += "-- " + line + "\n";
+    for (const Comment& c : f.comments) {
+        std::vector<std::string> lines;  // a /* */ comment may span lines
+        size_t start = 0;
+        while (start <= c.text.size()) {
+            size_t nl = c.text.find('\n', start);
+            std::string line = trimBlank(
+                c.text.substr(start, nl == std::string::npos ? std::string::npos : nl - start));
+            if (!line.empty()) lines.push_back(line);
             if (nl == std::string::npos) break;
             start = nl + 1;
+        }
+        if (lines.empty()) continue;
+        bool safe = c.text.find("/-") == std::string::npos && c.text.find("-/") == std::string::npos;
+        if (c.block && safe) {
+            out += "/- " + lines[0];
+            for (size_t k = 1; k < lines.size(); ++k) out += "\n   " + lines[k];
+            out += " -/\n";
+        } else {
+            for (const std::string& line : lines) out += "-- " + line + "\n";
         }
     }
 }

@@ -9,3 +9,4 @@ example : poly 10 4 = 15 := by rfl
 example : neg 0 = -1 := by rfl
 example : mask 1 = 256 := by rfl
 example : zero = 0 := by rfl
+example : bits 1 = 11 := by rfl

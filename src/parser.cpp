@@ -2,9 +2,9 @@
 //
 // Recursive descent over the slice-0 grammar. The second half is the
 // validation pass that runs after parsing: every identifier must be a
-// parameter or a defined function, every callee must be defined above its
-// caller (slice 0 emits source order), and arities must match. All of this
-// is checked here so the emitted Lean has no name errors left to find.
+// parameter or a defined function, and arities must match. All of this is
+// checked here so the emitted Lean has no name errors left to find. Order
+// is not checked: toposort.cpp reorders the definitions afterwards.
 
 #include "parser.h"
 
@@ -221,7 +221,7 @@ struct Parser {
     // The `int`, the name, the parameter list are already consumed by the caller.
     Function parseFunction(std::string name, int defLine,
                            std::vector<std::pair<std::string, std::string>> params,
-                           std::vector<std::string> comments) {
+                           std::vector<Comment> comments) {
         Function f;
         f.name = std::move(name);
         f.defLine = defLine;
@@ -245,10 +245,10 @@ struct Parser {
 // ---- validation pass ----------------------------------------------------
 
 // Every name the emitted Lean will mention must be known: parameters are
-// values, functions are called with the right arity, and — because slice 0
-// emits source order — a callee must be defined above its caller.
+// values and functions are called with the right arity. (Definition order is
+// fixed later by toposort.cpp, so a callee may sit above or below its caller.)
 void checkExpr(const Expr& e, const std::string& file, const std::set<std::string>& params,
-               const std::map<std::string, std::pair<size_t, size_t>>& sigs, size_t caller) {
+               const std::map<std::string, size_t>& sigs) {
     switch (e.kind) {
     case Expr::Kind::IntLit:
         return;
@@ -262,11 +262,11 @@ void checkExpr(const Expr& e, const std::string& file, const std::set<std::strin
              "clean rejects unknown names instead of emitting Lean that fails later (D5).",
              "declare it, define it, or fix the typo.");
     case Expr::Kind::UnaryNeg:
-        checkExpr(e.kids[0], file, params, sigs, caller);
+        checkExpr(e.kids[0], file, params, sigs);
         return;
     case Expr::Kind::Binary:
-        checkExpr(e.kids[0], file, params, sigs, caller);
-        checkExpr(e.kids[1], file, params, sigs, caller);
+        checkExpr(e.kids[0], file, params, sigs);
+        checkExpr(e.kids[1], file, params, sigs);
         return;
     case Expr::Kind::Call: {
         if (params.count(e.text))
@@ -278,18 +278,13 @@ void checkExpr(const Expr& e, const std::string& file, const std::set<std::strin
             fail(file, e.loc, "`" + e.text + "` is called but not defined in this file",
                  "slice 0 resolves calls inside the file; `extern` declarations come later.",
                  "define `" + e.text + "` in the same file.");
-        if (it->second.first > caller)
-            fail(file, e.loc, "`" + e.text + "` is defined below its caller",
-                 "slice 0 emits definitions in source order, and Lean needs the callee first "
-                 "(topological sorting is not built yet).",
-                 "move the definition of `" + e.text + "` above this function.");
-        if (it->second.second != e.kids.size())
-            fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second.second) +
+        if (it->second != e.kids.size())
+            fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second) +
                      " argument(s) but is called with " + std::to_string(e.kids.size()),
                  "the arity is checked here so that Lean does not have to report it.",
                  "match the parameter list.");
         for (const Expr& a : e.kids)
-            checkExpr(a, file, params, sigs, caller);
+            checkExpr(a, file, params, sigs);
         return;
     }
     }
@@ -304,10 +299,10 @@ TranslationUnit parse(const std::vector<Token>& tokens,
     TranslationUnit unit;
     unit.fileName = fileName;
 
-    std::vector<std::string> pending;  // comments waiting for the next definition
+    std::vector<Comment> pending;  // comments waiting for the next definition
     while (true) {
         while (p.peek().kind == Token::Kind::Comment) {
-            pending.push_back(p.peek().text);
+            pending.push_back({p.peek().text, p.peek().block});
             ++p.i;
         }
         if (p.atEnd()) break;
@@ -343,19 +338,17 @@ TranslationUnit parse(const std::vector<Token>& tokens,
     }
 
     // Name and arity checks over the parsed tree.
-    std::map<std::string, std::pair<size_t, size_t>> sigs;  // name → (definition index, arity)
-    for (size_t idx = 0; idx < unit.functions.size(); ++idx) {
-        const Function& f = unit.functions[idx];
+    std::map<std::string, size_t> sigs;  // name → arity
+    for (const Function& f : unit.functions) {
         if (sigs.count(f.name))
             fail(fileName, Loc{f.defLine, 1}, "function `" + f.name + "` is defined twice",
                  "Lean allows only one definition per name.", "rename one of them.");
-        sigs[f.name] = {idx, f.params.size()};
+        sigs[f.name] = f.params.size();
     }
-    for (size_t idx = 0; idx < unit.functions.size(); ++idx) {
-        const Function& f = unit.functions[idx];
+    for (const Function& f : unit.functions) {
         std::set<std::string> params;
         for (const auto& pr : f.params) params.insert(pr.second);
-        checkExpr(f.body, fileName, params, sigs, idx);
+        checkExpr(f.body, fileName, params, sigs);
     }
     return unit;
 }

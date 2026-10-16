@@ -10,7 +10,7 @@ def add (a b : Int) : Int := a + b
 def twice (x : Int) : Int := add x x
 
 -- c: arith.c:10
--- a block comment above a definition also survives
+/- a block comment above a definition also survives -/
 def triple (x : Int) : Int := add x (twice x)
 
 -- c: arith.c:13
@@ -28,3 +28,9 @@ def mask (x : Int) : Int := x + 0xFF
 -- c: arith.c:24
 -- a function without parameters
 def zero : Int := 0
+
+-- c: arith.c:29
+/- a block comment may span
+   several lines -/
+-- binary literals are valid Lean as written
+def bits (x : Int) : Int := x + 0b1010

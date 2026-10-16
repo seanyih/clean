@@ -12,6 +12,7 @@
 //   primary   :=  INTLIT | IDENT | IDENT '(' args ')' | '(' expr ')'
 //
 // Prototypes are dropped (main-spec §7.1). Everything else is a diagnostic.
+// Functions come back in source order; toposort.h puts them in Lean order.
 
 #pragma once
 

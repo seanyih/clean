@@ -22,3 +22,8 @@ int later(int x);
 
 // a function without parameters
 int zero(void) { return 0; }
+
+/* a block comment may span
+   several lines */
+// binary literals are valid Lean as written
+int bits(int x) { return x + 0b1010; }

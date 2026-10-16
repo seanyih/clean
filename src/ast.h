@@ -26,17 +26,23 @@ struct Expr {
     Loc loc;  // start of the expression, for diagnostics
 };
 
+// A C comment kept for the output. `block` = it was `/* … */` (else `// …`).
+struct Comment {
+    std::string text;  // without the delimiters; may span lines
+    bool block = false;
+};
+
 // One `int f(int a, int b) { return …; }`.
 struct Function {
     std::string name;
     std::vector<std::pair<std::string, std::string>> params;  // (C type, name), in order
     Expr body;                          // the single return expression
-    std::vector<std::string> comments;  // comment text that sat directly above the definition
+    std::vector<Comment> comments;      // comments that sat directly above the definition
     int defLine = 0;                    // line of the leading `int` (D9: `-- c: file:LINE`)
 };
 
 // One translated file.
 struct TranslationUnit {
     std::string fileName;               // base name, e.g. "arith.c", used in comments
-    std::vector<Function> functions;     // source order (no topological sort in slice 0)
+    std::vector<Function> functions;    // parser: source order; after sortDefinitions(): callees first
 };

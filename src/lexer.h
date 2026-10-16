@@ -18,13 +18,14 @@ struct Token {
     enum class Kind { End, Ident, IntLit, Comment, Punct, Other };
     Kind kind = Kind::End;
     // Ident   → the name
-    // IntLit  → literal spelling ("42", "0xFF")
+    // IntLit  → literal spelling ("42", "0xFF", "0b101")
     // Comment → comment text without the // or /* */ delimiters (may span lines)
     // Punct   → one of ( ) { } , ; + - * / %
     // Other   → something the lexer saw but slice 0 does not translate
     //           (= < "x" 'c' [ ] . …); still a token so the parser can point at it
     std::string text;
     Loc loc;
+    bool block = false;  // Comment only: true for `/* … */`, false for `// …`
 };
 
 struct LexResult {
