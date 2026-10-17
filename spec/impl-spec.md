@@ -81,9 +81,10 @@ are recorded; **using** one is an error, not a silent wrong name), Sparkle,
 theorems.
 
 Diagnostic codes: **E103** (assignment as expression), **E105** (switch
-fall-through), **E110** (`++`/`--` in an expression) follow the main-spec
-catalogue. **E000** is the placeholder for everything else ("not in the
-current build"); real codes arrive with the features they guard.
+fall-through), **E110** (`++`/`--` in an expression) follow the catalogue
+in spec/error-codes.md, which also tracks which codes are implemented.
+**E000** is the placeholder for everything else ("not in the current
+build"); real codes arrive with the features they guard.
 
 ## How the tool is put together
 
@@ -168,7 +169,7 @@ Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
   (`if`/`switch` bodies are real scopes and may shadow freely.)
 - **`/` and `%` on negative numbers differ from C** (see `notes/`): C gives
   `-7/2 = -3`, `-7%2 = -1`; Lean's `/` and `%` on `Int` give `-4` and `1`.
-  Needs a decision in the main spec.
+  Needs a decision — open decision OD8 in spec/open-decisions.md.
 - **`main` is not special yet** (§7.1 says `IO UInt32`); today it is an
   ordinary `Int` function.
 - **No macro expansion**: `#define`d names are rejected when used.

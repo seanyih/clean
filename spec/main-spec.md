@@ -72,25 +72,10 @@ C-fluent hardware engineers who do not want to learn Lean syntax. The tool must 
 
 ## 2. Design decisions
 
-| ID  | Decision                                                                                                                                                                                                                                                                         | Rationale                                                                                                                             |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| D1  | **One-way, C → Lean.** Not every Lean construct has a C spelling. Anything unreachable is covered by explicit passthrough macros (`LEAN_DECL`, `LEAN_STMT`, `LEAN_EXPR`).                                                                                                        | "All Lean syntax has a C counterpart" cannot hold (dependent types, tactics, universe levels). Passthrough keeps the tool open-ended. |
-| D2  | C need not compile, but must parse. A prelude header (`lean.h`, §3.1) supplies `bv`, `BV`, `VERIFY_FORALL`, `LEAN_*`, `NOSYNTH`; Sparkle names come from `sparkle.h` (§17).                                                                                                      | Lets IDEs and a C front-end parse hardware-flavoured C without a build.                                                               |
-| D3  | Output is **idiomatic Lean**: `def`, `do`, `let mut`, `for`, `match`. It is not an AST plus interpreter.                                                                                                                                                                         | Readable for review; matches what FPIL teaches.                                                                                       |
-| D4  | **C syntax, Lean semantics.** The tool does not emulate C. Divergences from C behaviour are reported only by **opt-in lints** (`--lint=c-semantics`, codes W001–W011); they are off by default. Genuinely unsupported syntax is still an **error**.                              | Your stated intent: pure syntax sugar. Keeps normal output quiet while allowing a C-minded reviewer to audit.                         |
-| D5  | **Reject, never guess.** Unsupported constructs are errors with a fix hint. No silent `sorry`/`axiom`.                                                                                                                                                                           | The translator is in the trusted base; silent wrong answers are worse than refusals.                                                  |
-| D6  | Two profiles: `model` and `synth` (§0.2).                                                                                                                                                                                                                                        | Ground-truth models may use strings, floats, `printf`; hardware stand-ins may not.                                                    |
-| D7  | **Purity is inferred**: pure → plain `def`; local mutation → `Id.run do`; I/O → `IO`.                                                                                                                                                                                            | Keeps pure functions pure, so they can appear in theorems.                                                                            |
-| D8  | Identifiers are preserved verbatim; Lean keywords fails loudly.                                                                                                                                                                                                                  | Predictable names.                                                                                                                    |
-| D9  | Every emitted declaration carries a traceability comment `-- c: file.c:LINE`.                                                                                                                                                                                                    | Review and debugging.                                                                                                                 |
-| D10 | **Permissive input, strict diagnostics**: missing includes/prototypes, int-as-bool, implicit conversions are accepted; the tool inserts the explicit Lean form and explains on request.                                                                                          | "Friendly for C users to write."                                                                                                      |
-| D11 | Theorems are generated only for the narrow equivalence pattern (§9).                                                                                                                                                                                                             | Scope control.                                                                                                                        |
-| D12 | The translator is a trusted component. A differential-testing harness (run C-side model vs `#eval` of the output) is recommended but non-normative.                                                                                                                              | Mitigates translator bugs that Lean cannot catch.                                                                                     |
-| D13 | v0.1 maps **all C arrays to `Array`**. `Vector α n` is opt-in (🟡).                                                                                                                                                                                                              | Matches FPIL, avoids index-proof friction.                                                                                            |
-| D14 | **Hardware modules are `HW` functions (from `sparkle.h`).** From vanilla C they are called with plain `BitVec`/`Bool` values; the tool lifts a call into Sparkle's `Signal` world by driving constant streams and sampling at a declared latency (§7.2, §17.5).                  | `Signal dom α` is a time stream (`Nat → α`); C has no time. A fixed, explicit convention keeps the C side time-free.                  |
-| D15 | **Vanilla Lean and Sparkle Lean are separated by header.** `lean.h` knows nothing of Sparkle; `sparkle.h` includes `lean.h` and adds the Sparkle names under the `[[sparkle::…]]` attribute namespace. Output imports Sparkle only when the header is included and used (§17.2). | Contains Sparkle API churn to one header plus one emitter back-end; vanilla output never depends on Sparkle.                          |
-| D16 | **One attribute, `extern` decides where the module lives.** `HW extern T f(…);` = defined in Lean; `HW T f(…) { … }` = defined in C and translated (🟡).                                                                                                                         | One concept for the user; same call rule either way.                                                                                  |
-| D17 | **`HW` bodies always obey the `synth` subset**, whatever the file's profile (§17.4).                                                                                                                                                                                             | A hardware body that is not synthesizable is a bug, not a model.                                                                      |
+The register lives in **[design-decisions.md](design-decisions.md)** — D1–D17,
+extracted from this section, plus every decided open question appended as D18+.
+Questions still waiting for a human call live in
+**[open-decisions.md](open-decisions.md)**.
 
 ---
 
@@ -161,9 +146,9 @@ Parameter assignment (`a = a + 1;` where `a` is a parameter) emits `let mut a :=
 
 | C                                                         | Lean                                  | Synth | Notes                                                                                                                      |
 | --------------------------------------------------------- | ------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------- |
-| `int`, `signed`, `short`, `long`, `long long`             | `Int`                                 | N     | **Decided (Q1/Q2):** unbounded, no wraparound. Pure sugar. Lint W001.                                                      |
+| `int`, `signed`, `short`, `long`, `long long`             | `Int`                                 | N     | **Decided** (design-decisions.md): unbounded, no wraparound. Pure sugar. Lint W001.                                                      |
 | `unsigned`, `unsigned int/short/long/long long`, `size_t` | `Nat`                                 | N     | **Decided:** `Nat`. Its subtraction truncates at 0 (lint W002).                                                            |
-| `int8_t`, `int16_t`, `int32_t`, `int64_t`                 | `Int8`, `Int16`, `Int32`, `Int64`     | S     | Lean's like-named types; they wrap, natively (reference §Fixed-Precision Integers). Nothing is emulated. **Decided (Q1).** |
+| `int8_t`, `int16_t`, `int32_t`, `int64_t`                 | `Int8`, `Int16`, `Int32`, `Int64`     | S     | Lean's like-named types; they wrap, natively (reference §Fixed-Precision Integers). Nothing is emulated. **Decided** (design-decisions.md). |
 | `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t`             | `UInt8`, `UInt16`, `UInt32`, `UInt64` | S     | Same.                                                                                                                      |
 | `__int128`, `uint128_t`                                   | ⛔                                     | —     | Lean has no 128-bit fixed integer; use `bv(128)`.                                                                          |
 | `bv(N)` / `_BitVec(N)`                                    | `BitVec N`                            | S     | `N` must be a compile-time constant (**E302**). Signless — see §5.4.                                                       |
@@ -445,7 +430,7 @@ example {dom : DomainConfig} :
 Restrictions:
 
 - A value-level call of a module with internal state is only meaningful if its latency is declared. Calling a `HW` extern that the tool cannot classify is **E304**.
-- Struct and array arguments at the hardware boundary (tuple bundles, `HWVector`) are 🟡 (**Q3**).
+- Struct and array arguments at the hardware boundary (tuple bundles, `HWVector`) are 🟡 (open decision OD2, spec/open-decisions.md).
 
 Rationale for this choice versus the alternatives is in §9.1.
 
@@ -716,7 +701,7 @@ Organised by the Language Reference. **Core features first; convenience features
   GENERIC(T) T max2(T a, T b) { return a > b ? a : b; }
   ```
   
-  → `def max2 {T : Type} [Ord T] (a b : T) : T := if a > b then a else b`. Typeclass constraints are inferred from the operators used (`+` → `[Add T]`, `<` → `[Ord T]`/`[LT T]`, `==` → `[BEq T]`). Open: how to spell several type parameters and explicit constraints (**Q5**).
+  → `def max2 {T : Type} [Ord T] (a b : T) : T := if a > b then a else b`. Typeclass constraints are inferred from the operators used (`+` → `[Add T]`, `<` → `[Ord T]`/`[LT T]`, `==` → `[BEq T]`). Open: how to spell several type parameters and explicit constraints (open decision OD4, spec/open-decisions.md).
 - **Overloading.** C11 `_Generic` selection maps to `match`-style dispatch or separate definitions in a namespace; true overloading arrives with C++ (§15).
 - **`Option`/`Except`** conventions for error-code returns.
 - **Lambdas / function pointers** as function-typed parameters.
@@ -794,53 +779,10 @@ Errors (E) and hints (H) are always shown. **Lints (W001–W013) are off by defa
 
 ### 13.2 Catalogue
 
-| Code | Severity      | Trigger                                                                                              | Fix hint                                                                   |
-| ---- | ------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| E101 | error         | pointer use outside §4.6                                                                             | use array parameter or return value                                        |
-| E102 | error         | `goto` / unused label                                                                                | restructure with loops                                                     |
-| E103 | error         | assignment as expression, comma operator, unrecognised verification loop                             | split into statements                                                      |
-| E104 | error         | `union`                                                                                              | use `bv(N)` and `bv_ext`/`bv_cat`                                          |
-| E105 | error         | `switch` fall-through                                                                                | add `break` or merge cases                                                 |
-| E106 | error         | mutable global or `static` local                                                                     | pass state as parameter                                                    |
-| E107 | error         | function pointer (v0.1)                                                                              | pass a named function (🟡)                                                 |
-| E108 | error         | `malloc`/`free`                                                                                      | fixed-size array                                                           |
-| E109 | error         | `volatile`, inline asm, variadics (except `printf` family), `setjmp`                                 | remove                                                                     |
-| E110 | error         | `++`/`--` inside an expression                                                                       | separate statement                                                         |
-| E111 | error         | bit-field                                                                                            | `bv(N)` member                                                             |
-| E112 | error         | `sizeof`                                                                                             | pass the size explicitly                                                   |
-| E113 | error         | threads/atomics                                                                                      | —                                                                          |
-| E201 | error (synth) | recursion                                                                                            | unroll or bound                                                            |
-| E202 | error (synth) | loop not reducible to range-for                                                                      | constant-bound `for`                                                       |
-| E203 | error (synth) | float types                                                                                          | fixed-point with `bv(N)`                                                   |
-| E204 | error (synth) | `String`/`char *`                                                                                    | `bv(8)` arrays                                                             |
-| E205 | error (synth) | I/O (`printf`, …)                                                                                    | mark function `NOSYNTH`                                                    |
-| E208 | error (synth) | unbounded `int`/`unsigned`                                                                           | `intN_t`/`uintN_t`/`bv(N)`                                                 |
-| E301 | error         | bit-width mismatch                                                                                   | `bv_zext`, `bv_sext`, `bv_ext`                                             |
-| E302 | error         | non-constant `bv` width                                                                              | use a constant or `#define`                                                |
-| E303 | error         | bitwise operator on `Int`                                                                            | `uintN_t` or `bv(N)`                                                       |
-| E304 | error         | value-level call of a `HW` extern whose latency is unknown, or of a stateful module with no `HW_LAT` | declare `HW` or `HW_LAT(n)`; stateful modules are checked with `VERIFY_AT` |
-| E401 | error         | Sparkle name (`HW`, `REG`, `NEXT`, …) used without `#include <sparkle.h>`                            | add the include (§17.2)                                                    |
-| E402 | error         | `REG`/`NEXT` outside an `HW` function body                                                           | move into an `HW` body                                                     |
-| E403 | error         | `NEXT` target is not a `REG`, or the same register has two `NEXT`s                                   | one `NEXT` per register; use `?:` for conditions                           |
-| E404 | error         | `HW` body calls a non-`HW` function                                                                  | mark the callee `HW`, or inline it                                         |
-| E405 | error         | signal-valued local reassigned in a way that is not a plain conditional                              | use `?:` or one assignment per branch                                      |
-| W001 | lint          | `int`-family is unbounded `Int`                                                                      | `intN_t` for fixed width                                                   |
-| W002 | lint          | `Nat` subtraction truncates at 0                                                                     | `--unsigned=int` or guard                                                  |
-| W003 | lint          | `long double` → `Float`                                                                              | —                                                                          |
-| W004 | lint          | uninitialised variable zero-initialised                                                              | initialise                                                                 |
-| W005 | lint          | division by zero is `0`                                                                              | guard                                                                      |
-| W006 | lint          | `printf` width/precision ignored                                                                     | —                                                                          |
-| W007 | lint          | `char` ↔ integer conversion                                                                          | `uint8_t`                                                                  |
-| W008 | lint          | exact-width arithmetic, no `int` promotion                                                           | —                                                                          |
-| W009 | lint          | `Int.toNat` clamps negative values                                                                   | —                                                                          |
-| W010 | lint          | `a[i]!` can panic                                                                                    | `--index=proof`                                                            |
-| W011 | lint          | string indexing is O(n)                                                                              | `Array Char`                                                               |
-| W012 | warning       | verification domain > 64 bits                                                                        | split                                                                      |
-| W013 | warning       | `sorry` emitted by `--prove=none`                                                                    | —                                                                          |
-| H001 | hint          | `bool a[N]`                                                                                          | `bv(N) a;`                                                                 |
-| H002 | hint          | loop is not full-domain                                                                              | `VERIFY_FORALL`                                                            |
-| H003 | hint          | `unsigned` where exact width intended                                                                | `uintN_t`                                                                  |
-| H004 | hint          | bitwise on `char`                                                                                    | `uint8_t`                                                                  |
+The catalogue — code, severity, trigger, fix hint — lives in
+**[error-codes.md](error-codes.md)**, extended with an *implemented?* column that
+tracks which codes the build actually emits. A code is added there when the
+feature that triggers it is built.
 
 ### 13.3 `synth` profile summary
 
@@ -1014,17 +956,9 @@ The relation to a Signal implementation is a bounded or inductive refinement sta
 
 ## 16. Open questions
 
-| #      | Question                                                                                                                                              | Why it matters                                                                              |
-| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **Q2** | Fix the clock domain with a file-level `variable {dom : DomainConfig}` (this spec), or let users pin a concrete domain (`#pragma lean domain Foo`)?   | Domain-polymorphic theorems are more general; a concrete domain can be simpler for tactics. |
-| **Q3** | Hardware boundary shapes: how should C structs and arrays map to Sparkle's tuple bundles (`Signal dom (A × B × …)`, right-nested) and `HWVector α n`? | Needed for modules with several outputs.                                                    |
-| **Q4** | Is `a[i]!` (panics) the right default, or should the translator reject out-of-range constant indices?                                                 | Affects proof friendliness.                                                                 |
-| **Q5** | Syntax for polymorphism and explicit constraints (`GENERIC(T)`, `GENERIC(T: Add)`)?                                                                   | Tier B design.                                                                              |
-| **Q6** | Should file-scope statements ("script mode") be allowed in ordinary `.c` files, or only inside a `[[lean::verify]]` function?                         | Parsability with standard C tools.                                                          |
-| **Q7** | Is C-authored hardware (`HW` bodies with `REG`/`NEXT`, §17.4) wanted at all, or should `sparkle.h` stay at the boundary (tier S0 only)?               | Decides whether v0.3 includes tiers S1/S2.                                                  |
-| **Q8** | Is non-blocking `NEXT(reg, expr)` (all updates land together at the clock edge) an acceptable C spelling for `Signal.reg` + `<~`?                     | Readability for RTL-minded users.                                                           |
-
-(Resolved: v0.1's Q1/Q2 by your sugar decision; v0.1's Q3 by §7.2/§9; v0.2's Q1 (exact-width types map to Lean's wrapping types). The numbering Q2–Q6 above is v0.2's; Q1 is retired.)
+Collected in **[open-decisions.md](open-decisions.md)**: one table stating the
+problem, where it is discussed, and the options on the table. Once a question is
+decided it moves to **[design-decisions.md](design-decisions.md)** as D18+.
 
 ---
 
@@ -1190,7 +1124,7 @@ theorem mul_reg_eq_spec : ∀ a b : BitVec 8,
 
 ### 17.8 Not covered (🔮)
 
-`Signal.loop` feedback, `Signal.memory`, `HWVector`, tuple bundles (Q3), multiple clock domains, reset/enable semantics beyond the initial value, simulation commands (`#sim`), and `#verify_emit`.
+`Signal.loop` feedback, `Signal.memory`, `HWVector`, tuple bundles (open decision OD2, spec/open-decisions.md), multiple clock domains, reset/enable semantics beyond the initial value, simulation commands (`#sim`), and `#verify_emit`.
 
 ---
 
