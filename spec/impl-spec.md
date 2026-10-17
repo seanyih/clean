@@ -3,8 +3,9 @@
 Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
-Current state: **slices 0–4** — `int` and `unsigned` functions with locals,
-`if`, `switch` and recursion.
+Current state: **slices 0–4** — integer-family functions (`int`, `unsigned`,
+`long`, `short`, `size_t`, …) with locals, `if`, `switch` and recursion. The
+type machinery is built to be extended: see `notes/adding-a-type.md`.
 
 ## What runs today
 
@@ -41,13 +42,13 @@ from the main spec's D7 table):
 **Expressions.** `42`, `0xFF`, `0b1010` keep their spelling; `+ - * / %` with
 C precedence and `( )`; `-x` → `(-x)`; `f(a, b)` → `f a b`.
 
-**Types.** `int` → `Int` and `unsigned` (also spelled `unsigned int`) → `Nat`
+**Types.** Signed spellings (`int`, `signed`, `short`, `long`, `long long`,
+any order, optional `int`) → `Int`; `unsigned …` and `size_t` → `Nat`
 (main-spec §4.1), everywhere a type can appear: return type, parameters,
-locals. Expressions are **not** type-checked: mixing `int` and `unsigned` in
-one expression is translated as written and left to Lean's coercions (D4,
-Lean semantics; the explicit conversions of §5.3 need expression typing and
-are not built yet). `unsigned short` and the other long spellings are refused
-until their slice.
+locals. Every expression gets a type (`Expr::type`, set by the checker; `Int`
+mixed with `Nat` is `Int`), but nothing is rejected for mixing: it is
+translated as written and left to Lean's coercions (D4; the explicit
+conversions of §5.3 are not built yet).
 
 **Tests.** `< <= > >= == != && || !` are allowed where a test is expected
 (an `if` condition, or inside another test) and become Lean propositions:
@@ -86,7 +87,9 @@ current build"); real codes arrive with the features they guard.
 
 ## How the tool is put together
 
-Six layers, one direction, no cleverness:
+Six layers, one direction, no cleverness. `types.cpp` sits beside them: the
+one place that knows C type spellings, Lean type names, and how types combine.
+The layers ask it; none of them names a type.
 
     main.cpp     driver — read input.c, run the layers, write output.lean
       │
@@ -106,6 +109,8 @@ Six layers, one direction, no cleverness:
       ▼
     emitter.cpp  AST   → Lean text   (merged params, `-- c:` comments)
 
+- `types.h` — `Type` plus: C words → type, type → Lean name, type of `a + b`,
+  how a value of the type becomes a test.
 - `ast.h` — the data all layers speak; `diag.h` — the error type and the
   §13.1 message format.
 - Each source file's header comment repeats its layer and its inputs/outputs.
@@ -138,7 +143,7 @@ The suite (`test/run_e2e.sh`, `make test`):
    by `lean` (code whose legality only Lean can judge: unproven termination).
 
 Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run: Lean 4.35.0, 27/27 passing.
+`lean` is missing). Last full run (without Lean, golden and refusal checks only): 26/26 passing; the Lean checks of `int_family` are written but not yet run.
 
 ## Main-spec decisions honored here
 

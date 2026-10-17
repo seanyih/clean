@@ -8,7 +8,7 @@
 //   prototype :=  type IDENT '(' params ')' ';'
 //   function  :=  attr* type IDENT '(' params ')' block
 //   attr      :=  '[[' 'lean' '::' 'partial' ']]'
-//   type      :=  'int' | 'unsigned' 'int'?        → Lean `Int` / `Nat` (main-spec §4.1)
+//   type      :=  one or more C type words, resolved by types.h (main-spec §4.1)
 //   params    :=  'void' | ε | type IDENT ( ',' type IDENT )*
 //   block     :=  '{' stmt* '}'
 //   stmt      :=  type IDENT '=' expr ';'              local

@@ -4,10 +4,9 @@
 //   * parentheses: C and Lean bind + - * / % identically, so a child needs
 //     parentheses only when it binds looser than its parent (or equally
 //     loose on the right, which keeps the tree's shape explicit);
-//   * parameters of the same C type merge into one Lean group:
-//     `int a, int b` → `(a b : Int)`, `unsigned a, unsigned b` → `(a b : Nat)`
-//     (main-spec §7.1; the §4.1 type table so far maps `int` → `Int`,
-//     `unsigned` → `Nat`);
+//   * parameters of the same type merge into one Lean group:
+//     `int a, int b` → `(a b : Int)` (main-spec §7.1); type names come from
+//     types.h, never from here;
 //   * a body that is one `return e;` becomes `def f … := e`; any other body
 //     becomes `Id.run do` with `let` / `let mut` / `:=` / `if` / `match`;
 //   * tests are Lean propositions: `==` → `=`, `!=` → `≠`, `&&` → `∧`,
@@ -20,6 +19,8 @@
 
 #include <vector>
 
+#include "types.h"
+
 namespace {
 
 std::string trimBlank(const std::string& s) {  // small twin of the lexer's; not worth sharing
@@ -30,10 +31,6 @@ std::string trimBlank(const std::string& s) {  // small twin of the lexer's; not
 }
 
 std::string pad(int level) { return std::string(2 * level, ' '); }
-
-// The main-spec §4.1 type table, as far as this build goes: `int` → `Int`,
-// `unsigned` → `Nat`.
-std::string leanType(const std::string& cType) { return cType == "unsigned" ? "Nat" : "Int"; }
 
 // ---- values ---------------------------------------------------------------
 
@@ -142,7 +139,7 @@ void emitCond(const Expr& e, std::string& out) {
         return;
     default:  // a number used as a test: C's "non-zero is true"
         emitExpr(e, out);
-        out += " ≠ 0";
+        out += truthSuffix(e.type);
     }
 }
 
@@ -236,7 +233,7 @@ void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
         emitComments(s.comments, pad(level), out);
         switch (s.kind) {
         case Stmt::Kind::Decl:
-            out += pad(level) + (s.mut ? "let mut " : "let ") + s.name + " : " + leanType(s.type) + " := ";
+            out += pad(level) + (s.mut ? "let mut " : "let ") + s.name + " : " + leanName(s.type) + " := ";
             emitExpr(s.expr, out);
             out += "\n";
             break;
@@ -291,7 +288,7 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
         bool first = true;
         size_t i = 0;
         while (i < f.params.size()) {  // merge runs of same-typed parameters (§7.1)
-            const std::string& ty = f.params[i].first;
+            const Type ty = f.params[i].first;
             std::string names;
             size_t j = i;
             for (; j < f.params.size() && f.params[j].first == ty; ++j) {
@@ -301,12 +298,12 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
             if (!first) out += ") (";
             first = false;
             out += names;
-            out += " : " + leanType(ty);
+            out += " : " + leanName(ty);
             i = j;
         }
         out += ")";
     }
-    out += " : " + leanType(f.retType) + " := ";
+    out += " : " + leanName(f.retType) + " := ";
     if (oneReturn) {
         emitExpr(f.body[0].expr, out);
         out += "\n";
@@ -314,10 +311,10 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
     }
     out += "Id.run do\n";
     for (const std::string& p : f.mutParams) {  // a parameter that is assigned (§3.3)
-        std::string ty = "int";
+        Type ty;
         for (const auto& param : f.params)
             if (param.second == p) ty = param.first;
-        out += pad(1) + "let mut " + p + " : " + leanType(ty) + " := " + p + "\n";
+        out += pad(1) + "let mut " + p + " : " + leanName(ty) + " := " + p + "\n";
     }
     emitStmts(f.body, 1, out);
 }

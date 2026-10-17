@@ -61,34 +61,51 @@ long long labelValue(const Expr& e) {
 
 // ---- the checker ----------------------------------------------------------
 
+struct Sig {
+    size_t arity;
+    Type ret;
+};
+
+// A visible name: its type, and its Decl (nullptr for a parameter) so
+// assignments can mark the Decl `mut`.
+struct Var {
+    Stmt* decl;
+    Type type;
+};
+
 struct Checker {
     const std::string& file;
-    const std::map<std::string, size_t>& sigs;  // function name → arity
+    const std::map<std::string, Sig>& sigs;  // function name → arity and return type
     Function& fn;
-    // scopes[0] holds the parameters (nullptr) and the function's top-level
-    // locals; a Decl is recorded by pointer so assignments can mark it `mut`.
-    std::vector<std::map<std::string, Stmt*>> scopes;
+    // scopes[0] holds the parameters and the function's top-level locals.
+    std::vector<std::map<std::string, Var>> scopes;
     std::vector<bool> bare;  // per scope: opened by a bare `{ }` block (flattened in Lean)
 
-    bool lookup(const std::string& name, Stmt*& decl) const {
+    bool lookup(const std::string& name, Var& v) const {
         for (size_t k = scopes.size(); k-- > 0;) {
             auto it = scopes[k].find(name);
             if (it != scopes[k].end()) {
-                decl = it->second;
+                v = it->second;
                 return true;
             }
         }
         return false;
     }
 
-    // An expression whose value is an `Int`.
-    void value(const Expr& e) {
+    // An expression whose value is a number. Records its type in `e.type`
+    // (the single place where expression types are decided) and returns it.
+    Type value(Expr& e) {
+        e.type = valueType(e);
+        return e.type;
+    }
+
+    Type valueType(Expr& e) {
         switch (e.kind) {
         case Expr::Kind::IntLit:
-            return;
+            return Type{Type::Kind::Literal};
         case Expr::Kind::Ident: {
-            Stmt* d;
-            if (lookup(e.text, d)) return;
+            Var v;
+            if (lookup(e.text, v)) return v.type;
             if (sigs.count(e.text))
                 fail(file, e.loc, "function `" + e.text + "` is used as a value",
                      "there are no function values (function pointers are ⛔ in the main spec).",
@@ -98,15 +115,15 @@ struct Checker {
                  "declare it, define it, or fix the typo.");
         }
         case Expr::Kind::UnaryNeg:
-            value(e.kids[0]);
-            return;
-        case Expr::Kind::Binary:
-            value(e.kids[0]);
-            value(e.kids[1]);
-            return;
+            return value(e.kids[0]);
+        case Expr::Kind::Binary: {
+            Type l = value(e.kids[0]);
+            Type r = value(e.kids[1]);
+            return commonType(l, r);
+        }
         case Expr::Kind::Call: {
-            Stmt* d;
-            if (lookup(e.text, d))
+            Var v;
+            if (lookup(e.text, v))
                 fail(file, e.loc, "variable `" + e.text + "` is called like a function",
                      "function values are not translated.",
                      "call a defined function, or drop the call.");
@@ -115,13 +132,13 @@ struct Checker {
                 fail(file, e.loc, "`" + e.text + "` is called but not defined in this file",
                      "calls are resolved inside the file; `extern` declarations come later.",
                      "define `" + e.text + "` in the same file.");
-            if (it->second != e.kids.size())
-                fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second) +
+            if (it->second.arity != e.kids.size())
+                fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second.arity) +
                          " argument(s) but is called with " + std::to_string(e.kids.size()),
                      "the arity is checked here so that Lean does not have to report it.",
                      "match the parameter list.");
-            for (const Expr& a : e.kids) value(a);
-            return;
+            for (Expr& a : e.kids) value(a);
+            return it->second.ret;
         }
         case Expr::Kind::Cmp:
         case Expr::Kind::And:
@@ -132,10 +149,11 @@ struct Checker {
                  "instead of guessing a coercion.",
                  "use it as an `if` condition, e.g. `if (c) x = 1; else x = 0;`.");
         }
+        return e.type;  // unreachable: every case above returns or throws
     }
 
     // An expression in a test position: a condition, or a number (≠ 0).
-    void cond(const Expr& e) {
+    void cond(Expr& e) {
         switch (e.kind) {
         case Expr::Kind::Cmp:
             value(e.kids[0]);
@@ -155,8 +173,8 @@ struct Checker {
     }
 
     void markAssigned(const Stmt& s) {
-        Stmt* d;
-        if (!lookup(s.name, d)) {
+        Var v;
+        if (!lookup(s.name, v)) {
             if (sigs.count(s.name))
                 fail(file, s.loc, "assignment to the function `" + s.name + "`",
                      "functions are not assignable.", "assign to a local variable.");
@@ -164,8 +182,8 @@ struct Checker {
                  "clean rejects unknown names instead of emitting Lean that fails later (D5).",
                  "declare it first: `int " + s.name + " = …;`.");
         }
-        if (d) {
-            d->mut = true;
+        if (v.decl) {
+            v.decl->mut = true;
         } else {
             bool seen = false;
             for (const std::string& p : fn.mutParams) seen = seen || p == s.name;
@@ -221,14 +239,14 @@ struct Checker {
                     fail(file, s.loc, "`" + s.name + "` is declared twice in the same scope",
                          "C rejects it, and Lean would silently shadow it.", "rename one of them.");
                 {
-                    Stmt* outer;
+                    Var outer;
                     if (bare.back() && lookup(s.name, outer))
                         fail(file, s.loc, "`" + s.name + "` in a bare `{ }` block hides a variable of the same name",
                              "Lean's nested `do` is not a scope, so the outer variable would be "
                              "wrongly replaced after the block.",
                              "rename the inner variable (`if`/`switch` bodies may shadow freely).");
                 }
-                scopes.back()[s.name] = &s;
+                scopes.back()[s.name] = Var{&s, s.type};
                 break;
             case Stmt::Kind::Assign:
                 value(s.expr);
@@ -263,7 +281,7 @@ struct Checker {
             if (!seen.insert(p.second).second)
                 fail(file, Loc{fn.defLine, 1}, "parameter `" + p.second + "` is declared twice",
                      "C rejects it too.", "rename one of them.");
-            scopes[0][p.second] = nullptr;
+            scopes[0][p.second] = Var{nullptr, p.first};
         }
         stmts(fn.body);
         if (!returnsOnAllPaths(fn.body))
@@ -277,12 +295,12 @@ struct Checker {
 }  // namespace
 
 void check(TranslationUnit& unit) {
-    std::map<std::string, size_t> sigs;  // name → arity
+    std::map<std::string, Sig> sigs;
     for (const Function& f : unit.functions) {
         if (sigs.count(f.name))
             fail(unit.fileName, Loc{f.defLine, 1}, "function `" + f.name + "` is defined twice",
                  "Lean allows only one definition per name.", "rename one of them.");
-        sigs[f.name] = f.params.size();
+        sigs[f.name] = Sig{f.params.size(), f.retType};
     }
     for (Function& f : unit.functions) Checker{unit.fileName, sigs, f, {}, {}}.run();
 }

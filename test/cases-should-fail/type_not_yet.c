@@ -1,2 +1,2 @@
-// types beyond `int` and `unsigned` land in a later slice
-short f(short x) { return x; }
+// types beyond the integer family land in a later slice
+double f(double x) { return x; }

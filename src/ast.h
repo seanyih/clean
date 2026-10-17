@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "diag.h"  // Loc
+#include "types.h" // Type
 
 // An expression.
 //   IntLit   text = literal spelling, kept verbatim (`42`, `0xFF`, `0b101`)
@@ -28,6 +29,7 @@ struct Expr {
     std::string text;
     std::vector<Expr> kids;
     Loc loc;  // start of the expression, for diagnostics
+    Type type;  // set by check.cpp: the C type of the value (Literal for a bare `42`)
 };
 
 // A C comment kept for the output. `block` = it was `/* … */` (else `// …`).
@@ -49,7 +51,7 @@ struct Case {
 };
 
 // A statement. The fields used depend on `kind`:
-//   Decl    `T name = expr;`        type, name, expr, mut   (T = `int` / `unsigned`)
+//   Decl    `T name = expr;`        type, name, expr, mut   (T = any type types.h knows)
 //   Assign  `name = expr;`          name, expr   (`+=`, `++` … are desugared by the parser)
 //   If      `if (expr) body else elseBody`   expr, body, elseBody (empty = no else)
 //   Return  `return expr;`          expr
@@ -61,7 +63,7 @@ struct Stmt {
     enum class Kind { Decl, Assign, If, Return, Switch, Block, Break };
     Kind kind = Kind::Return;
     std::string name;
-    std::string type;                   // Decl: the C type as written (`int`, `unsigned`)
+    Type type;                          // Decl: the declared type
     Expr expr;
     std::vector<Stmt> body;
     std::vector<Stmt> elseBody;
@@ -84,11 +86,11 @@ void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
     }
 }
 
-// One `T f(T a, T b) { … }` with T = `int` or `unsigned` (main-spec §4.1).
+// One `T f(T a, T b) { … }`, T any type types.h knows (main-spec §4.1).
 struct Function {
     std::string name;
-    std::string retType = "int";        // the C return type as written (`int`, `unsigned`)
-    std::vector<std::pair<std::string, std::string>> params;  // (C type, name), in order
+    Type retType;                       // the return type
+    std::vector<std::pair<Type, std::string>> params;  // (type, name), in order
     std::vector<Stmt> body;
     std::vector<Comment> comments;      // comments that sat directly above the definition
     int defLine = 0;                    // line of the leading `int` (D9: `-- c: file:LINE`)
