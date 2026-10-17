@@ -1,7 +1,7 @@
 # How to extend `clean` — a developer's manual
 
 For downstream developers: where a feature lives, which files to touch, and
-how to prove it works. State: slices 0–4 (2026-10-17). If the architecture
+how to prove it works. State: slices 0–5 (2026-10-17). If the architecture
 moves, update this file with your slice.
 
 ## The pipeline (src/)
@@ -16,15 +16,19 @@ moves, update this file with your slice.
     parser.cpp    tokens → AST      syntax only; desugars `x += e` → `x = x + e`
       │                              and `x++;` → `x = x + 1`
       ▼
-    check.cpp     AST → AST         names, arity, scopes, tests-vs-numbers,
-      │                              every path returns, switch rules, marks
-      │                              which locals are `mut`
+    check.cpp     AST → AST         names, arity, scopes, expression types
+      │                              (Expr::type) and implicit conversions,
+      │                              tests-vs-values, every path returns,
+      │                              switch rules, marks which locals are `mut`
       ▼
     toposort.cpp  AST → AST         callees first; finds recursion / mutual groups
       │
       ▼
     emitter.cpp   AST → Lean text   (merged params, `-- c:` comments)
 
+- `types.h/.cpp` — beside the pipeline, not in it: the **only** file that
+  names a C type, a Lean type, or a rule about mixing/converting them. The
+  parser, checker and emitter ask it and never hardcode a type.
 - `ast.h` — the data all layers speak. `diag.h` — the error type and the
   main-spec §13.1 rendering. Everything is one direction, no cleverness.
 - To refuse: `fail(…)` / `failHere(…)` (E000) or `failCode("E###", …)` in
@@ -44,39 +48,67 @@ moves, update this file with your slice.
    agreement — if your change contradicts it, raise it with the human
    ([open-decisions.md](open-decisions.md)) instead of editing silently.
 6. Keep the "what this build does" strings fresh: the `kSliceWhy` messages
-   in lexer.cpp / parser.cpp and each file's header comment.
+   in lexer.cpp / parser.cpp, `supportedTypesHint()` in types.cpp, and each
+   file's header comment.
 
-## Recipe 1 — add a type to the type table (`int` → `Int`, `unsigned` → `Nat`, …)
+## Recipe 1 — add a datatype
 
-The main-spec §4.1 table lands row by row. Slice 4 did exactly this for
-`unsigned` → `Nat`; imitate it.
+Everything about a type lives in `src/types.h` / `src/types.cpp`. The parser,
+checker and emitter call it; none of them names a type, so most types need
+no change outside those two files.
 
-1. **parser.cpp, `parseCType()`** — accept the new C spelling and return the
-   string the AST stores (e.g. `"unsigned"`). Multi-word spellings are
-   consumed here too (see the `unsigned int` skip); refuse compound forms
-   that are not in this slice yet (see the `unsigned <word>` refusal).
-2. **parser.cpp, `kUntranslated`** — remove the word(s) so they stop being
-   auto-refused with E000.
-   **Trap:** `expectName()` rejects type words in *name* position using
-   `int`/`unsigned` **plus** `kUntranslated`. A word that leaves
-   `kUntranslated` must be added to that check by hand, or `int short f();`
-   would parse `short` as a function name (slice 4 fixed this for
-   `int int f()`, `unsigned unsigned x = 1;`).
-3. **emitter.cpp, `leanType()`** — add C spelling → Lean type. This one
-   function is the whole table: return types, parameters, locals and the
-   assigned-parameter `let mut` all go through it, so nothing else in the
-   emitter changes.
-4. **ast.h** — no change (types are plain strings), but update the
-   "T = `int` / `unsigned`" comments on `Function` and `Decl` so the next
-   reader is not misled.
-5. **check.cpp** — only if the new type changes what is legal: e.g. `bool`
-   makes truthiness trivial; `bv(N)` adds width checks (E301/E302); mixed
-   types need the expression-typing pass (open decision OD9).
-6. **Prove it:** add `test/cases/<name>.c` + `.expected.lean` +
-   `.checks.lean` (Lean `example`s, usually `by rfl`); keep a
-   `test/cases-should-fail/` case for the spellings that are still refused
-   (cf. `type_not_yet.c`). `make test`.
-7. **impl-spec.md** — extend "Current state" and the types paragraph.
+**Case 1: a new C spelling of an existing type** (`long`, `size_t`, a new
+`intN_t` width…). One edit: `kSupported` (and the rule in `resolveTypeWords`).
+Move the word out of `kRefused` if it was there. Done.
+
+**Case 2: a new type** (what `bool`, `uint8_t`, `bv(N)`, `double`, `char`
+each were). In `types.h` / `types.cpp`:
+
+1. `Type::Kind` — add the kind (and use `width` if it is parametrised;
+   `bv(N)` does).
+2. `resolveTypeWords` — the C spelling → the kind. A spelling with arguments
+   (`bv(8)`) is read by the parser (`Parser::parseCType`) and handed to a
+   `makeXxx` function here.
+3. Compile. `-Wswitch` now lists every `switch (t.kind)` that lacks the new
+   kind. The ones to fill in:
+   - `leanName`, `cName` — the Lean and C spellings;
+   - `truthTest` — how a value becomes a test (main-spec §5.2);
+   - `checkBinaryOp` / `checkUnaryOp` — which operators exist on it (bitwise
+     on `Int` → E303, `%` on floats, …);
+   - `unify` — what happens when it meets another type (default: refused);
+   - `flowKind` / `convert` — implicit conversions and casts (§5.3). `convert`
+     writes the Lean for each (from, to) pair; a missing pair is refused with
+     "cast through …".
+4. If the type has literals, teach the lexer a token (`FloatLit`, `CharLit`),
+   the parser an `Expr::Kind`, check.cpp `valueType` its type, emitter.cpp
+   `emitExpr` its spelling. (`BvLit`, `FloatLit`, `CharLit`, `BoolLit` are
+   the worked examples; integer literals need nothing because `Literal`
+   adapts to any numeric type.)
+5. Operators are printed with **Lean's** precedence (`leanLevel` in
+   emitter.cpp), not C's. A new operator needs its level there and its row in
+   `checkBinaryOp`.
+
+**Prove it:** `test/cases/<name>.c` + `.expected.lean` (read it yourself
+before committing it) + `.checks.lean` (`#guard`s that evaluate the
+translated functions; plain `example … := by rfl` works for `Int`/`Nat`
+only). Add `test/cases-should-fail/` files for each refusal you added. Then
+update impl-spec.md (the types table) and error-codes.md.
+
+**Where the next features hook in**
+
+| Feature (main-spec)                  | Hook                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------- |
+| typedefs, structs, enums (§4.5)      | file-scope declarations in `TranslationUnit` + `toposort.cpp` ordering; a `Type::Kind` that carries a name (add fields to `Type`, update `operator==`) |
+| arrays (§4.4), strings (§4.3)        | a `Kind` with an element type (`Type` gets a child); `a[i]` as an `Expr::Kind` |
+| `void` / `IO` (§8)                   | return type + purity inference (D7) in `emitFunction`                      |
+| `bv_*` helpers (§5.4)                | calls to known names in `check.cpp` `Call`; signatures in types.cpp       |
+| `switch` on `uint8_t`/`bv`/`char`    | lift the guard in `check.cpp` `switchStmt` once Lean accepts the patterns |
+| lints W001–W011                      | a pass after check; `convert`/`unify` already know where they apply       |
+
+**Unverified Lean names** (never run — the sandbox that wrote them had no
+Lean): see impl-spec.md "Known simplifications". If `make test` fails in a
+`.checks.lean` for one of the new types, the name list there is where to
+look first; fix it in `convert` / `leanName` / `truthTest`.
 
 ## Recipe 2 — extend the Lean keyword exclusion list
 

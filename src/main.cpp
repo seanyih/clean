@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
     try {
         const std::string source = readFile(in);
         LexResult lexed = lex(source, baseName(in));
-        TranslationUnit unit = parse(lexed.tokens, lexed.definedNames, baseName(in));
+        TranslationUnit unit = parse(lexed.tokens, lexed.definedNames, lexed.definedValues, baseName(in));
         check(unit);
         sortDefinitions(unit);
         writeFile(out, emit(unit));

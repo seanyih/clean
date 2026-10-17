@@ -62,7 +62,7 @@ long long labelValue(const Expr& e) {
 // ---- the checker ----------------------------------------------------------
 
 struct Sig {
-    size_t arity;
+    std::vector<Type> params;
     Type ret;
 };
 
@@ -92,8 +92,24 @@ struct Checker {
         return false;
     }
 
-    // An expression whose value is a number. Records its type in `e.type`
-    // (the single place where expression types are decided) and returns it.
+    // ---- typing ---------------------------------------------------------------
+    //
+    // `value` decides the type of an expression and records it in `e.type`
+    // (the one place expression types come from). `valueAs` is `value` plus
+    // "this must end up as type T": it accepts, converts implicitly, or refuses
+    // (types.h `flowKind`). Tests (`cond`) and bool-valued comparisons
+    // (`boolValue`) are the only places where `< == && !` may appear.
+
+    [[noreturn]] void failDiag(const std::string& code, Loc loc, const std::string& what,
+                               const std::string& why, const std::string& fix) {
+        failCode(code.c_str(), file, loc, what, why, fix);
+    }
+
+    static bool isTestOp(const Expr& e) {
+        return e.kind == Expr::Kind::Cmp || e.kind == Expr::Kind::And ||
+               e.kind == Expr::Kind::Or || e.kind == Expr::Kind::Not;
+    }
+
     Type value(Expr& e) {
         e.type = valueType(e);
         return e.type;
@@ -102,7 +118,15 @@ struct Checker {
     Type valueType(Expr& e) {
         switch (e.kind) {
         case Expr::Kind::IntLit:
-            return Type{Type::Kind::Literal};
+            return Type::of(Type::Kind::Literal);
+        case Expr::Kind::FloatLit:
+            return Type::of(Type::Kind::FloatLiteral);
+        case Expr::Kind::CharLit:
+            return Type::of(Type::Kind::Char);
+        case Expr::Kind::BoolLit:
+            return Type::of(Type::Kind::Bool);
+        case Expr::Kind::BvLit:
+            return e.type;  // the parser set the width
         case Expr::Kind::Ident: {
             Var v;
             if (lookup(e.text, v)) return v.type;
@@ -115,11 +139,29 @@ struct Checker {
                  "declare it, define it, or fix the typo.");
         }
         case Expr::Kind::UnaryNeg:
-            return value(e.kids[0]);
+        case Expr::Kind::BitNot: {
+            Type t = value(e.kids[0]);
+            OpRule r = checkUnaryOp(e.kind == Expr::Kind::UnaryNeg ? "-" : "~", t);
+            if (!r.ok) failDiag(r.code, e.loc, r.problem, r.why, r.fix);
+            return t;
+        }
+        case Expr::Kind::Cast: {
+            Expr& kid = e.kids[0];
+            Type from = isTestOp(kid) ? Type::of(Type::Kind::Bool) : value(kid);
+            if (isTestOp(kid)) valueAs(kid, from);
+            std::string why, fix;
+            if (convert(from, e.type, "x", &why, &fix).empty())
+                fail(file, e.loc, "cannot cast `" + cName(from) + "` to `" + cName(e.type) + "`", why, fix);
+            return e.type;
+        }
         case Expr::Kind::Binary: {
             Type l = value(e.kids[0]);
             Type r = value(e.kids[1]);
-            return commonType(l, r);
+            Unified u = unify(l, r);
+            if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
+            OpRule op = checkBinaryOp(e.text, u.type);
+            if (!op.ok) failDiag(op.code, e.loc, op.problem, op.why, op.fix);
+            return u.type;
         }
         case Expr::Kind::Call: {
             Var v;
@@ -132,12 +174,12 @@ struct Checker {
                 fail(file, e.loc, "`" + e.text + "` is called but not defined in this file",
                      "calls are resolved inside the file; `extern` declarations come later.",
                      "define `" + e.text + "` in the same file.");
-            if (it->second.arity != e.kids.size())
-                fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second.arity) +
+            if (it->second.params.size() != e.kids.size())
+                fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second.params.size()) +
                          " argument(s) but is called with " + std::to_string(e.kids.size()),
                      "the arity is checked here so that Lean does not have to report it.",
                      "match the parameter list.");
-            for (Expr& a : e.kids) value(a);
+            for (size_t k = 0; k < e.kids.size(); ++k) valueAs(e.kids[k], it->second.params[k]);
             return it->second.ret;
         }
         case Expr::Kind::Cmp:
@@ -145,19 +187,88 @@ struct Checker {
         case Expr::Kind::Or:
         case Expr::Kind::Not:
             fail(file, e.loc, "a comparison or logical operator is used as a number",
-                 "in C it would be 0 or 1; clean keeps tests (Lean `Prop`) and numbers (`Int`) apart "
-                 "instead of guessing a coercion.",
-                 "use it as an `if` condition, e.g. `if (c) x = 1; else x = 0;`.");
+                 "in C it would be 0 or 1; clean keeps tests and numbers apart instead of "
+                 "guessing a coercion.",
+                 "use it as an `if` condition (`if (c) x = 1; else x = 0;`), or store it in a `bool`.");
         }
         return e.type;  // unreachable: every case above returns or throws
     }
 
-    // An expression in a test position: a condition, or a number (≠ 0).
+    // `a OP b` of a comparison: both sides numbers (or bools/chars) of one type.
+    void cmpOperands(Expr& e) {
+        Type l = value(e.kids[0]);
+        Type r = value(e.kids[1]);
+        Unified u = unify(l, r);
+        if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
+        const bool eq = e.text == "==" || e.text == "!=";
+        if (u.type.kind == Type::Kind::Bool && !eq)
+            fail(file, e.loc, "`" + e.text + "` on `bool`", "Lean's `Bool` has no order; only `==` and `!=`.",
+                 "compare the underlying numbers instead.");
+    }
+
+    // A `bool`-valued expression: `a < b`, `p && q`, `!p`, or any `bool`.
+    void boolValue(Expr& e) {
+        switch (e.kind) {
+        case Expr::Kind::Cmp:
+            cmpOperands(e);
+            break;
+        case Expr::Kind::And:
+        case Expr::Kind::Or:
+            valueAs(e.kids[0], Type::of(Type::Kind::Bool));
+            valueAs(e.kids[1], Type::of(Type::Kind::Bool));
+            break;
+        case Expr::Kind::Not:
+            valueAs(e.kids[0], Type::of(Type::Kind::Bool));
+            break;
+        default:
+            break;
+        }
+        e.type = Type::of(Type::Kind::Bool);
+    }
+
+    // `e` must end up with type `target`: as is, via an implicit conversion
+    // (number → bool, literal → char), or refused.
+    void valueAs(Expr& e, Type target) {
+        if (isTestOp(e)) {
+            if (target.kind != Type::Kind::Bool) value(e);  // throws the "used as a number" refusal
+            boolValue(e);
+            return;
+        }
+        Type t = value(e);
+        switch (flowKind(t, target)) {
+        case Flow::Same:
+            if ((target.kind == Type::Kind::Nat || target.kind == Type::Kind::UInt) &&
+                e.kind == Expr::Kind::UnaryNeg && e.kids[0].kind == Expr::Kind::IntLit)
+                fail(file, e.loc, "a negative value for `" + cName(target) + "`",
+                     "Lean's `" + leanName(target) + "` cannot hold it.",
+                     "use a non-negative value, or an `int`/`intN_t` type.");
+            return;
+        case Flow::Convert: {
+            Expr inner = std::move(e);
+            e = Expr();
+            e.kind = Expr::Kind::Cast;
+            e.implicit = true;
+            e.type = target;
+            e.loc = inner.loc;
+            e.kids.push_back(std::move(inner));
+            return;
+        }
+        case Flow::Refuse: {
+            const bool bits = t.kind == Type::Kind::BitVec && target.kind == Type::Kind::BitVec;
+            failDiag(bits ? "E301" : "E000", e.loc,
+                     "a value of type `" + cName(t) + "` is used where `" + cName(target) + "` is expected",
+                     bits ? "a bit-vector operation needs equal widths; Lean rejects the rest."
+                          : "Lean has no implicit conversion between them, and clean does not pick one (D5).",
+                     "cast it explicitly: `(" + cName(target) + ")x`.");
+        }
+        }
+    }
+
+    // An expression in a test position: a condition, or a value (≠ 0).
     void cond(Expr& e) {
         switch (e.kind) {
         case Expr::Kind::Cmp:
-            value(e.kids[0]);
-            value(e.kids[1]);
+            cmpOperands(e);
             return;
         case Expr::Kind::And:
         case Expr::Kind::Or:
@@ -167,12 +278,16 @@ struct Checker {
         case Expr::Kind::Not:
             cond(e.kids[0]);
             return;
-        default:
-            value(e);
+        default: {
+            Type t = value(e);
+            if (!hasTruth(t))
+                fail(file, e.loc, "a `" + cName(t) + "` is used as a test",
+                     "main-spec §5.2 has no truthiness rule for it.", "compare it explicitly.");
+        }
         }
     }
 
-    void markAssigned(const Stmt& s) {
+    Type markAssigned(const Stmt& s) {
         Var v;
         if (!lookup(s.name, v)) {
             if (sigs.count(s.name))
@@ -189,6 +304,7 @@ struct Checker {
             for (const std::string& p : fn.mutParams) seen = seen || p == s.name;
             if (!seen) fn.mutParams.push_back(s.name);
         }
+        return v.type;
     }
 
     void scoped(std::vector<Stmt>& list, bool isBare = false) {
@@ -200,7 +316,11 @@ struct Checker {
     }
 
     void switchStmt(Stmt& s) {
-        value(s.expr);
+        Type st = value(s.expr);
+        if (st.kind != Type::Kind::Int && st.kind != Type::Kind::Nat && st.kind != Type::Kind::Literal)
+            fail(file, s.expr.loc, "`switch` on a `" + cName(st) + "` is not translated yet",
+                 "only `int`/`unsigned` scrutinees are; match patterns on the other types are unverified.",
+                 "use an `if`/`else if` chain.");
         std::set<long long> seen;
         bool haveDefault = false;
         for (size_t k = 0; k < s.cases.size(); ++k) {
@@ -234,7 +354,7 @@ struct Checker {
                      "delete it, or move the `return` below it.");
             switch (s.kind) {
             case Stmt::Kind::Decl:
-                value(s.expr);  // the name is not in scope in its own initialiser
+                valueAs(s.expr, s.type);  // the name is not in scope in its own initialiser
                 if (scopes.back().count(s.name))
                     fail(file, s.loc, "`" + s.name + "` is declared twice in the same scope",
                          "C rejects it, and Lean would silently shadow it.", "rename one of them.");
@@ -248,17 +368,19 @@ struct Checker {
                 }
                 scopes.back()[s.name] = Var{&s, s.type};
                 break;
-            case Stmt::Kind::Assign:
-                value(s.expr);
-                markAssigned(s);
+            case Stmt::Kind::Assign: {
+                Var target;
+                if (lookup(s.name, target)) valueAs(s.expr, target.type);
+                markAssigned(s);  // refuses unknown names and functions
                 break;
+            }
             case Stmt::Kind::If:
                 cond(s.expr);
                 scoped(s.body);
                 scoped(s.elseBody);
                 break;
             case Stmt::Kind::Return:
-                value(s.expr);
+                valueAs(s.expr, fn.retType);
                 break;
             case Stmt::Kind::Switch:
                 switchStmt(s);
@@ -300,7 +422,10 @@ void check(TranslationUnit& unit) {
         if (sigs.count(f.name))
             fail(unit.fileName, Loc{f.defLine, 1}, "function `" + f.name + "` is defined twice",
                  "Lean allows only one definition per name.", "rename one of them.");
-        sigs[f.name] = Sig{f.params.size(), f.retType};
+        Sig sig;
+        sig.ret = f.retType;
+        for (const auto& p : f.params) sig.params.push_back(p.first);
+        sigs[f.name] = sig;
     }
     for (Function& f : unit.functions) Checker{unit.fileName, sigs, f, {}, {}}.run();
 }

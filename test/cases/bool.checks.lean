@@ -1,0 +1,21 @@
+-- not yet run against Lean: `#guard` evaluates the translated functions.
+#guard less 1 2 = true
+#guard less 2 1 = false
+#guard inRange 5 1 9 = true
+#guard inRange 0 1 9 = false
+#guard both true false = true
+#guard both true true = false
+#guard nonzero 0 = false
+#guard nonzero 3 = true
+#guard yes = true
+#guard pick true 1 2 = 1
+#guard pick false 1 2 = 2
+#guard clamp01 (-4) = 0
+#guard clamp01 9 = 1
+#guard clamp01 1 = 1
+#guard viaCall 3 = 1
+#guard viaCall 5 = 0
+#guard viaCall (-2) = -1
+#guard viaCall 20 = 0
+#guard same true true = true
+#guard same true false = false

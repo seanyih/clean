@@ -15,21 +15,34 @@
 
 // An expression.
 //   IntLit   text = literal spelling, kept verbatim (`42`, `0xFF`, `0b101`)
+//   FloatLit text = Lean spelling of a floating literal (`1.5`, `2e3`)
+//   CharLit  text = Lean spelling of a character literal, quotes included (`'a'`)
+//   BoolLit  text = `true` / `false`
+//   BvLit    text = the value, `type` the width: `BV(8, 0x63)` → `0x63#8`
 //   Ident    text = a parameter or local name
 //   UnaryNeg one kid: `-x`
-//   Binary   text = operator (+ - * / %), kids [lhs, rhs]
+//   BitNot   one kid: `~x`
+//   Cast     one kid, `type` = target: `(T)x`, or an implicit conversion
+//            inserted by check.cpp (`implicit`)
+//   Binary   text = operator (+ - * / % & | ^ << >>), kids [lhs, rhs]
 //   Call     text = callee name, kids = arguments
 //   Cmp      text = < <= > >= == !=, kids [lhs, rhs]      } "conditions":
 //   And, Or  kids [lhs, rhs]                              } only legal where
 //   Not      one kid                                      } a test is expected
-// Conditions are Lean `Prop`s, values are `Int`s; check.cpp keeps them apart.
+// In an `if` test, Cmp/And/Or/Not are Lean `Prop`s; where a `bool` is expected
+// they are `Bool` values (`decide (a < b)`, `&&`); check.cpp decides which.
+// Anywhere else they are refused.
 struct Expr {
-    enum class Kind { IntLit, Ident, UnaryNeg, Binary, Call, Cmp, And, Or, Not };
+    enum class Kind {
+        IntLit, FloatLit, CharLit, BoolLit, BvLit, Ident, UnaryNeg, BitNot, Cast,
+        Binary, Call, Cmp, And, Or, Not
+    };
     Kind kind = Kind::IntLit;
     std::string text;
     std::vector<Expr> kids;
     Loc loc;  // start of the expression, for diagnostics
-    Type type;  // set by check.cpp: the C type of the value (Literal for a bare `42`)
+    Type type;  // the C type of the value; set by check.cpp (parser: Cast target, BvLit width)
+    bool implicit = false;  // Cast: inserted by check.cpp, not written in the C source
 };
 
 // A C comment kept for the output. `block` = it was `/* … */` (else `// …`).

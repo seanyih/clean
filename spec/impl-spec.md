@@ -3,9 +3,11 @@
 Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
-Current state: **slices 0–4** — integer-family functions (`int`, `unsigned`,
-`long`, `short`, `size_t`, …) with locals, `if`, `switch` and recursion. The
-type machinery is built to be extended: see `notes/adding-a-type.md`.
+Current state: **slices 0–5** — functions over every scalar type of
+main-spec §4.1 (integers, `intN_t`/`uintN_t`, `bool`, `char`, `bv(N)`,
+`float`/`double`) with locals, `if`, `switch` (on `int`/`unsigned`), casts
+and recursion. Adding a type is one table row plus a few `case`s: see
+[how-to-extend.md](how-to-extend.md).
 
 ## What runs today
 
@@ -31,33 +33,60 @@ from the main spec's D7 table):
 
 | C                                    | Lean                                          |
 | ------------------------------------ | --------------------------------------------- |
-| `T x = e;` (`int` / `unsigned`)      | `let x : Int / Nat := e` (`let mut` if reassigned) |
+| `T x = e;` (any scalar type)         | `let x : T' := e` (`let mut` if reassigned)   |
 | `x = e;`  `x += e;`  `x++;`          | `x := e`  `x := x + e`  `x := x + 1`          |
-| assigning a parameter                | `let mut a : Int / Nat := a` at the top       |
+| assigning a parameter                | `let mut a : T' := a` at the top              |
 | `if (c) … else if (d) … else …`      | `if c then … else if d then … else …`         |
 | `switch (e) { case 0: case 1: … }`   | `match e with \| 0 \| 1 => …` (see below)     |
 | `return e;`                          | `return e`                                    |
 | `{ … }` (bare block)                 | flattened into its parent                     |
 
-**Expressions.** `42`, `0xFF`, `0b1010` keep their spelling; `+ - * / %` with
-C precedence and `( )`; `-x` → `(-x)`; `f(a, b)` → `f a b`.
+**Expressions.** Literals: `42`, `0xFF`, `0b1010` keep their spelling;
+`1.5`, `2e3`, `.5` (a trailing `f` is dropped) are floating literals;
+`'a'`, `'\n'` are `Char`; `true`/`false` are `Bool`; `BV(8, 0x63)` is
+`0x63#8`. Operators `+ - * / %` and the bitwise `& | ^ ~ << >>` (→ `&&& |||
+^^^ ~~~ <<< >>>`) follow C's parse tree. The output carries the parentheses
+*Lean's* precedence needs, which differs from C's for shifts and bitwise
+operators. `-x` → `(-x)`, `f(a, b)` → `f a b`, `(T)e` is a cast.
 
-**Types.** Signed spellings (`int`, `signed`, `short`, `long`, `long long`,
-any order, optional `int`) → `Int`; `unsigned …` and `size_t` → `Nat`
-(main-spec §4.1), everywhere a type can appear: return type, parameters,
-locals. Every expression gets a type (`Expr::type`, set by the checker; `Int`
-mixed with `Nat` is `Int`), but nothing is rejected for mixing: it is
-translated as written and left to Lean's coercions (D4; the explicit
-conversions of §5.3 are not built yet).
+**Types** (main-spec §4.1, all of it except arrays/strings/`void`):
+
+| C                                                         | Lean                          |
+| --------------------------------------------------------- | ----------------------------- |
+| `int`, `signed`, `short`, `long`, `long long` (any order) | `Int`                         |
+| `unsigned …`, `size_t`                                    | `Nat`                         |
+| `int8_t` … `int64_t`                                      | `Int8` … `Int64`              |
+| `uint8_t` … `uint64_t`, `unsigned char`                   | `UInt8` … `UInt64`            |
+| `bv(N)` (N a literal or `#define NAME <integer>`)         | `BitVec N`                    |
+| `float`                                                   | `Float32`                     |
+| `double`, `long double`                                   | `Float`                       |
+| `bool`, `_Bool`                                           | `Bool`                        |
+| `char`                                                    | `Char`                        |
+
+Every expression has a type (`Expr::type`, set by the checker). Literals
+adapt to the other operand. Operands of one operation must have **one type**
+— `Int` with `Nat` is the single exception and gives `Int` (Lean coerces).
+Anything else is refused (`uint8_t + int`, `char + 1`, `bv(8) + bv(4)` =
+**E301**); the fix is a cast, because Lean has no implicit conversions.
+Casts follow main-spec §5.3 (see `convert` in types.cpp for the exact Lean
+spelling per pair). Implicit conversions are only these: number → `bool`
+("non-zero", D10), integer literal → `char` (`Char.ofNat`), and `Nat` → `Int`.
+Operators are checked per type: bitwise on `int` is **E303**, on `char`
+**H004**, `%` on floats, `-` on unsigned types, and `~` on `unsigned` are
+refused with a fix.
 
 **Tests.** `< <= > >= == != && || !` are allowed where a test is expected
 (an `if` condition, or inside another test) and become Lean propositions:
-`==` → `=`, `!=` → `≠`, `&&` → `∧`, `||` → `∨`, `!` → `¬`. A plain number
-used as a test means "non-zero": `if (x)` → `if x ≠ 0 then`. A comparison
-anywhere else (`return a < b;`) is refused: C would make it 0 or 1, and
-clean does not guess a coercion.
+`==` → `=`, `!=` → `≠`, `&&` → `∧`, `||` → `∨`, `!` → `¬`; on floats `==`
+and `!=` stay `==`/`!=` (no decidable `=`). A value used as a test means
+"non-zero" (`x ≠ 0`, `x ≠ 0#8` on `bv(8)`, `x != 0.0` on floats; a `bool`
+as is; a `char` is refused). Where a **`bool` is wanted** (initialiser,
+assignment, argument, `return`) the same operators are `Bool` values:
+`decide (a < b)`, `&&`, `||`, `!`. Anywhere else a comparison is refused: C
+would make it 0 or 1, and clean does not guess a coercion.
 
-**Switch.** Labels are integer literals (`3`, `-1`, `0x10`). Labels that
+**Switch.** The scrutinee is `int` or `unsigned` (match patterns on the other
+types are unverified). Labels are integer literals (`3`, `-1`, `0x10`). Labels that
 follow each other become one or-pattern. Each case ends with `break;` or a
 `return`; `default` may sit anywhere and is emitted last; no `default` →
 `| _ => pure ()`. Fall-through from a non-empty case is **E105**.
@@ -73,15 +102,17 @@ cannot (see `cases-lean-rejects`).
 
 Not translated yet (each is a hard error with location + why + fix):
 loops (`for`, `while`, `do`, `continue`), `break` outside a switch case's end,
-`?:`, uninitialised locals (`int x;`), types beyond `int` and `unsigned`
-(`bool`, `char`, `bv(N)`, the fixed-width `intN_t`/`uintN_t`, `unsigned short`
-and friends …), `main` special-casing, I/O and `printf`, arrays, structs,
+`?:`, uninitialised locals (`int x;`), `void`, strings (`char *`), arrays,
+structs, enums, typedefs, the §5.4 bit-vector helpers (`bv_cat` …),
+`switch` on the new types, `main` special-casing, I/O and `printf`, arrays, structs,
 enums, `extern`, other attributes, preprocessor expansion (`#define` names
 are recorded; **using** one is an error, not a silent wrong name), Sparkle,
 theorems.
 
 Diagnostic codes: **E103** (assignment as expression), **E105** (switch
-fall-through), **E110** (`++`/`--` in an expression) follow the catalogue
+fall-through), **E110** (`++`/`--` in an expression), **E301** (bit-width
+mismatch), **E302** (bit-vector width not a constant), **E303** (bitwise on
+`int`), **H004** (bitwise on `char`) follow the catalogue
 in spec/error-codes.md, which also tracks which codes are implemented.
 **E000** is the placeholder for everything else ("not in the current
 build"); real codes arrive with the features they guard.
@@ -89,8 +120,8 @@ build"); real codes arrive with the features they guard.
 ## How the tool is put together
 
 Six layers, one direction, no cleverness. `types.cpp` sits beside them: the
-one place that knows C type spellings, Lean type names, and how types combine.
-The layers ask it; none of them names a type.
+one place that knows C type spellings, Lean type names, and how types mix,
+convert and print as tests. The layers ask it; none of them names a type.
 
     main.cpp     driver — read input.c, run the layers, write output.lean
       │
@@ -101,17 +132,18 @@ The layers ask it; none of them names a type.
     parser.cpp   tokens → AST        syntax only; desugars `+=` and `x++;`
       │
       ▼
-    check.cpp    AST   → AST         names, arity, scopes, tests-vs-numbers,
-      │                              every path returns, switch rules;
-      │                              marks which locals are `mut`
+    check.cpp    AST   → AST         names, arity, scopes, expression types
+      │                              (Expr::type), implicit conversions,
+      │                              tests-vs-values, every path returns,
+      │                              switch rules; marks which locals are `mut`
       ▼
     toposort.cpp AST   → AST         callees first; marks recursion / mutual groups
       │
       ▼
     emitter.cpp  AST   → Lean text   (merged params, `-- c:` comments)
 
-- `types.h` — `Type` plus: C words → type, type → Lean name, type of `a + b`,
-  how a value of the type becomes a test.
+- `types.h` — `Type` plus: C words → type, type → Lean name, `unify` (type of
+  `a + b`), per-type operator rules, `convert` (casts), `truthTest`.
 - `ast.h` — the data all layers speak; `diag.h` — the error type and the
   §13.1 message format.
 - Each source file's header comment repeats its layer and its inputs/outputs.
@@ -144,7 +176,11 @@ The suite (`test/run_e2e.sh`, `make test`):
    by `lean` (code whose legality only Lean can judge: unproven termination).
 
 Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run (without Lean, golden and refusal checks only): 26/26 passing; the Lean checks of `int_family` are written but not yet run.
+`lean` is missing). Last full run **without Lean** (golden diffs and refusals
+only): 42/42 passing. The `.checks.lean` files of `int_family`, `fixed_width`,
+`bool`, `bitvec`, `float` and `char` are written but **not yet run against
+Lean**: run `make test` where `lean` is installed, and see the "unverified
+names" list in how-to-extend.md if one fails.
 
 ## Main-spec decisions honored here
 
@@ -180,15 +216,27 @@ Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
   Octal and suffixes (`10u`) are not translated.
 - **Recursion is judged by Lean:** clean does not try to prove termination,
   and E201 (recursion rejected in `synth`) does not exist yet.
-- **Expressions are not type-checked.** `int` and `unsigned` may be mixed in
-  one expression; the output is translated as written and relies on Lean's
-  `Nat → Int` coercions (D4). A negative literal reaching an `unsigned`
-  (`unsigned x = -1;`) becomes a Lean type error, not a `clean` diagnostic.
+- **Mixed types are refused, not converted** (open decision OD9): only
+  `Int` with `Nat` mix freely. Main-spec §4.2 would insert `char`↔integer
+  conversions by itself; clean asks for the cast (`(unsigned)c`) instead.
+  Likewise there is no implicit `Int` → `Nat` (`unsigned x = intVar;` is
+  refused; cast it).
+- **Unverified Lean names.** Written from the main spec and Lean docs, never
+  run: `Float32` and its conversions (`Float.toFloat32`, `Float32.toFloat`),
+  `Float.toUInt8`/`toInt8`…, `IntN.ofInt`/`ofNat`/`toInt`, `Neg`/`Complement`
+  on `IntN`, `BitVec.ofInt`, shifts with a literal amount on `BitVec`.
+- **`switch` on `uint8_t`, `bv(N)`, `char`…** is refused: literal patterns on
+  those types are unverified. Use `if`/`else if`.
+- **Casts of `Int` to `uintN_t`** wrap (`UIntN.ofNat ((x % 2^N).toNat)`);
+  `Int`→`Nat` clamps negatives to 0 (lint W009, no lint pass yet).
+- **`bv(N)` widths** are literals or `#define NAME <integer>` only.
 
 ## Next slices (suggested, one e2e case each)
 
-1. `bool` → `Bool` (slice 4 did `unsigned` → `Nat`, the first §4.1 row after
-   `int`; with `Nat`, simple recursion passes without `partial`).
-2. Range-`for` (§6.1) and `while`; `break`/`continue` inside them.
-3. `printf` → `IO` (§8), which also brings the `main : IO UInt32` rule.
-4. `bv(N)` and the §5.4 helpers — the hardware-flavoured core.
+1. Range-`for` (§6.1) and `while`; `break`/`continue` inside them.
+2. `printf` → `IO` (§8), `void`, and the `main : IO UInt32` rule.
+3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
+   give E301 its fix.
+4. Arrays (§4.4), strings (§4.3), then structs / enums / typedefs (§4.5):
+   these need file-scope declarations in the AST, which is the next
+   structural step.

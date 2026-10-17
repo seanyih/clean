@@ -7,6 +7,7 @@
 
 #include "parser.h"
 
+#include <cstdlib>
 #include <utility>
 
 namespace {
@@ -24,7 +25,8 @@ const std::set<std::string> kLeanKeywords = {
     "return", "import", "open", "namespace", "variable", "partial", "private",
     "while", "for", "in", "break", "continue", "sorry", "by", "from", "have",
     "show", "Type", "Prop", "Unit", "Nat", "Int", "Bool", "String", "Char",
-    "Float", "BitVec", "Array", "List", "Option", "true", "false",
+    "Float", "Float32", "BitVec", "Array", "List", "Option", "true", "false", "decide",
+    "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
 };
 
 // Statement keywords that come in a later slice.
@@ -45,7 +47,9 @@ std::string describe(const Token& t) {
     switch (t.kind) {
     case Token::Kind::End:     return "end of file";
     case Token::Kind::Ident:   return "`" + t.text + "`";
-    case Token::Kind::IntLit:  return "literal `" + t.text + "`";
+    case Token::Kind::IntLit:
+    case Token::Kind::FloatLit:
+    case Token::Kind::CharLit: return "literal `" + t.text + "`";
     case Token::Kind::Comment: return "a comment";
     case Token::Kind::Punct:   return "`" + t.text + "`";
     case Token::Kind::Other:   return "`" + t.text + "`";
@@ -57,23 +61,28 @@ std::string describe(const Token& t) {
 int binaryPrec(const std::string& op) {
     if (op == "||") return 1;
     if (op == "&&") return 2;
-    if (op == "==" || op == "!=") return 3;
-    if (op == "<" || op == "<=" || op == ">" || op == ">=") return 4;
-    if (op == "+" || op == "-") return 5;
-    if (op == "*" || op == "/" || op == "%") return 6;
+    if (op == "|") return 3;
+    if (op == "^") return 4;
+    if (op == "&") return 5;
+    if (op == "==" || op == "!=") return 6;
+    if (op == "<" || op == "<=" || op == ">" || op == ">=") return 7;
+    if (op == "<<" || op == ">>") return 8;
+    if (op == "+" || op == "-") return 9;
+    if (op == "*" || op == "/" || op == "%") return 10;
     return 0;
 }
 
 Expr::Kind binaryKind(const std::string& op) {
     if (op == "||") return Expr::Kind::Or;
     if (op == "&&") return Expr::Kind::And;
-    if (binaryPrec(op) == 3 || binaryPrec(op) == 4) return Expr::Kind::Cmp;
+    if (binaryPrec(op) == 6 || binaryPrec(op) == 7) return Expr::Kind::Cmp;
     return Expr::Kind::Binary;
 }
 
 struct Parser {
     const std::vector<Token>& toks;
     const std::set<std::string>& macros;
+    const std::map<std::string, std::string>& macroValues;  // `#define N 8` (bv widths only)
     const std::string& file;
     size_t i = 0;
 
@@ -131,18 +140,53 @@ struct Parser {
                classifyTypeWord(peek().text) != TypeWord::NotAType;
     }
 
+    // The `N` of `bv(N)` / `BV(N, v)`: an integer literal, or a
+    // `#define NAME <integer literal>`; anything else is E302.
+    long long parseWidthValue() {
+        long long n = -1;
+        if (peek().kind == Token::Kind::IntLit) {
+            n = std::strtoll(peek().text.c_str(), nullptr, 0);  // decimal or 0x…
+            if (peek().text.size() > 1 && peek().text[1] == 'b') n = -1;
+            ++i;
+        } else if (peek().kind == Token::Kind::Ident && macroValues.count(peek().text)) {
+            n = std::strtoll(macroValues.at(peek().text).c_str(), nullptr, 0);
+            ++i;
+        }
+        if (n < 0)
+            failCode("E302", file, peek().loc, "the width of a bit-vector is not a constant I can read",
+                     "Lean's `BitVec N` needs the width at translation time.",
+                     "write a decimal literal, or `#define NAME 8` (a plain integer) and use `bv(NAME)`.");
+        return n;
+    }
+
+    Type bitVecType(long long n, Loc at) {
+        TypeResolution r = makeBitVec(n);
+        if (!r.ok) failCode(r.code.c_str(), file, at, r.problem, r.why, r.fix);
+        return r.type;
+    }
+
+    Type parseBitVec() {
+        Loc at = peek().loc;
+        ++i;  // `bv`
+        expectPunct("(", "after `bv`");
+        long long n = parseWidthValue();
+        expectPunct(")", "to close `bv(…)`");
+        return bitVecType(n, at);
+    }
+
     // One C type: all consecutive type words (`unsigned long long int`),
-    // resolved by types.cpp. Knows no type by name itself.
+    // resolved by types.cpp, or `bv(N)`. Knows no type by name itself.
     Type parseCType() {
         if (!atTypeWord())
             failHere("expected a type, found " + describe(peek()),
                      "only " + supportedTypesHint() + " are translated in this slice.",
                      "write " + supportedTypesHint() + "; the type table grows slice by slice.");
         Loc at = peek().loc;
+        if (isBitVecWord(peek().text)) return parseBitVec();
         std::vector<std::string> words;
-        while (atTypeWord()) words.push_back(toks[i++].text);
+        while (atTypeWord() && !isBitVecWord(peek().text)) words.push_back(toks[i++].text);
         TypeResolution r = resolveTypeWords(words);
-        if (!r.ok) fail(file, at, r.problem, r.why, r.fix);
+        if (!r.ok) failCode(r.code.c_str(), file, at, r.problem, r.why, r.fix);
         return r.type;
     }
 
@@ -196,16 +240,49 @@ struct Parser {
 
     Expr parseUnary() {
         if (isPunct("++") || isPunct("--")) failIncDec();
-        if (isPunct("-") || isPunct("!")) {
+        if (isPunct("(") && peek2().kind == Token::Kind::Ident &&
+            classifyTypeWord(peek2().text) != TypeWord::NotAType) {  // a cast `(T)x`
+            Loc at = peek().loc;
+            ++i;
+            Type target = parseCType();
+            expectPunct(")", "to close the cast");
+            Expr e;
+            e.kind = Expr::Kind::Cast;
+            e.type = target;
+            e.loc = at;
+            e.kids.push_back(parseUnary());
+            return e;
+        }
+        if (isPunct("-") || isPunct("!") || isPunct("~")) {
             Token op = toks[i++];
             Expr e;
-            e.kind = op.text == "-" ? Expr::Kind::UnaryNeg : Expr::Kind::Not;
+            e.kind = op.text == "-" ? Expr::Kind::UnaryNeg
+                     : op.text == "~" ? Expr::Kind::BitNot : Expr::Kind::Not;
             e.loc = op.loc;
             e.kids.push_back(parseUnary());
             return e;
         }
         Expr e = parsePrimary();
         if (isPunct("++") || isPunct("--")) failIncDec();
+        return e;
+    }
+
+    // `BV(8, 0x63)` → the literal `0x63#8` (main-spec §5.4).
+    Expr parseBvLiteral() {
+        Loc at = peek().loc;
+        i += 2;  // `BV` `(`
+        Type t = bitVecType(parseWidthValue(), at);
+        expectPunct(",", "between the width and the value of `BV(…)`");
+        if (peek().kind != Token::Kind::IntLit)
+            failHere("the value of `BV(…)` must be an integer literal",
+                     "Lean's `v#N` literal takes a numeral.", "write e.g. `BV(8, 0x63)`.");
+        Expr e;
+        e.kind = Expr::Kind::BvLit;
+        e.text = peek().text;
+        e.type = t;
+        e.loc = at;
+        ++i;
+        expectPunct(")", "to close `BV(…)`");
         return e;
     }
 
@@ -219,6 +296,25 @@ struct Parser {
             e.loc = t.loc;
             return e;
         }
+        if (t.kind == Token::Kind::FloatLit || t.kind == Token::Kind::CharLit) {
+            ++i;
+            Expr e;
+            e.kind = t.kind == Token::Kind::FloatLit ? Expr::Kind::FloatLit : Expr::Kind::CharLit;
+            e.text = t.text;
+            e.loc = t.loc;
+            return e;
+        }
+        if (t.kind == Token::Kind::Ident && (t.text == "true" || t.text == "false")) {
+            ++i;
+            Expr e;
+            e.kind = Expr::Kind::BoolLit;
+            e.text = t.text;
+            e.loc = t.loc;
+            return e;
+        }
+        if (t.kind == Token::Kind::Ident && t.text == "BV" && peek2().kind == Token::Kind::Punct &&
+            peek2().text == "(")
+            return parseBvLiteral();
         if (t.kind == Token::Kind::Ident) {
             if (macros.count(t.text))
                 fail(file, t.loc,
@@ -311,7 +407,7 @@ struct Parser {
         if (op != "=") {  // compound: x += e  →  x = x + e
             Expr bin;
             bin.kind = Expr::Kind::Binary;
-            bin.text = op.substr(0, 1);
+            bin.text = op.substr(0, op.size() - 1);
             bin.loc = name.loc;
             bin.kids.push_back(var());
             bin.kids.push_back(std::move(rhs));
@@ -324,6 +420,7 @@ struct Parser {
         if (peek().kind != Token::Kind::Ident || peek2().kind != Token::Kind::Punct) return false;
         const std::string& t = peek2().text;
         return t == "=" || t == "+=" || t == "-=" || t == "*=" || t == "/=" || t == "%=" ||
+               t == "&=" || t == "|=" || t == "^=" || t == "<<=" || t == ">>=" ||
                t == "++" || t == "--";
     }
 
@@ -588,8 +685,9 @@ struct Parser {
 
 TranslationUnit parse(const std::vector<Token>& tokens,
                       const std::set<std::string>& definedNames,
+                      const std::map<std::string, std::string>& definedValues,
                       const std::string& fileName) {
-    Parser p{tokens, definedNames, fileName, 0};
+    Parser p{tokens, definedNames, definedValues, fileName, 0};
     TranslationUnit unit;
     unit.fileName = fileName;
 

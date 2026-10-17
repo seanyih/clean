@@ -34,70 +34,137 @@ std::string pad(int level) { return std::string(2 * level, ' '); }
 
 // ---- values ---------------------------------------------------------------
 
-// Binding power; higher binds tighter. Only used to place parentheses.
-int prec(const Expr& e) {
+// How tightly a Lean spelling binds; higher binds tighter. Only used to place
+// parentheses. The numbers are Lean's own operator levels, which differ from
+// C's (`+` binds looser than `<<<` in Lean, tighter in C), so the C tree is
+// printed with the parentheses Lean needs, not the ones C would.
+int leanLevel(const std::string& op) {
+    if (op == "|") return 55;                  // |||
+    if (op == "^") return 58;                  // ^^^
+    if (op == "&") return 60;                  // &&&
+    if (op == "+" || op == "-") return 65;
+    if (op == "*" || op == "/" || op == "%") return 70;
+    return 75;                                 // <<<  >>>
+}
+
+std::string leanOp(const std::string& op) {
+    if (op == "&") return "&&&";
+    if (op == "|") return "|||";
+    if (op == "^") return "^^^";
+    if (op == "<<") return "<<<";
+    if (op == ">>") return ">>>";
+    return op;
+}
+
+Type cmpType(const Expr& e) { return unify(e.kids[0].type, e.kids[1].type).type; }
+
+// Level of the Lean text of `e` when used as a value (a `bool`-valued test
+// included). 100 = an atom that needs no parentheses anywhere.
+int level(const Expr& e) {
     switch (e.kind) {
-    case Expr::Kind::Binary:
-        return (e.text == "+" || e.text == "-") ? 1 : 2;  // * / %
-    case Expr::Kind::UnaryNeg:
-        return 3;
-    default:
-        return 4;  // literals, names, calls (application binds tightest in Lean)
+    case Expr::Kind::Binary: return leanLevel(e.text);
+    case Expr::Kind::Cmp:    return cmpIsBool(cmpType(e), e.text) ? 50 : 90;  // `a == b` / `decide (…)`
+    case Expr::Kind::And:    return 35;
+    case Expr::Kind::Or:     return 30;
+    case Expr::Kind::Not:
+    case Expr::Kind::Cast:
+    case Expr::Kind::Call:   return 90;  // applications
+    default:                 return 100;
     }
 }
 
-bool atomic(const Expr& e) {
-    return e.kind == Expr::Kind::IntLit || e.kind == Expr::Kind::Ident;
+void emitExpr(const Expr& e, std::string& out);
+
+// `e` as an argument or as the receiver of `.toNat`: parenthesised unless atomic.
+void emitAtom(const Expr& e, std::string& out) {
+    if (level(e) == 100) {
+        emitExpr(e, out);
+        return;
+    }
+    out += '(';
+    emitExpr(e, out);
+    out += ')';
+}
+
+void emitChild(const Expr& e, int parentLevel, bool right, std::string& out) {
+    const int l = level(e);
+    const bool paren = right ? l <= parentLevel : l < parentLevel;  // `<=` keeps associativity visible
+    if (paren) out += '(';
+    emitExpr(e, out);
+    if (paren) out += ')';
 }
 
 void emitExpr(const Expr& e, std::string& out) {
     switch (e.kind) {
     case Expr::Kind::IntLit:
+    case Expr::Kind::FloatLit:
+    case Expr::Kind::CharLit:
+    case Expr::Kind::BoolLit:
     case Expr::Kind::Ident:
         out += e.text;
         return;
+    case Expr::Kind::BvLit:
+        out += e.text + "#" + std::to_string(e.type.width);
+        return;
     case Expr::Kind::UnaryNeg:
         out += "(-";  // always parenthesised: simple and unambiguous in every position
-        emitExpr(e.kids[0], out);
+        emitAtom(e.kids[0], out);
         out += ")";
         return;
+    case Expr::Kind::BitNot:
+        out += "(~~~";
+        emitAtom(e.kids[0], out);
+        out += ")";
+        return;
+    case Expr::Kind::Cast: {
+        std::string x;
+        emitAtom(e.kids[0], x);
+        out += convert(e.kids[0].type, e.type, x, nullptr, nullptr);  // check.cpp proved it exists
+        return;
+    }
     case Expr::Kind::Call:
         out += e.text;
         for (const Expr& arg : e.kids) {
             out += ' ';
-            if (!atomic(arg)) {  // an argument that is not an atom needs parentheses
-                out += '(';
-                emitExpr(arg, out);
-                out += ')';
-            } else {
-                emitExpr(arg, out);
-            }
+            emitAtom(arg, out);
         }
         return;
     case Expr::Kind::Binary: {
-        const Expr& l = e.kids[0];
-        const Expr& r = e.kids[1];
-        if (prec(l) < prec(e)) {
-            out += '(';
-            emitExpr(l, out);
-            out += ')';
-        } else {
-            emitExpr(l, out);
-        }
-        out += ' ';
-        out += e.text;
-        out += ' ';
-        if (prec(r) <= prec(e)) {  // `<=` keeps the tree's associativity visible
-            out += '(';
-            emitExpr(r, out);
-            out += ')';
-        } else {
-            emitExpr(r, out);
-        }
+        const int me = leanLevel(e.text);
+        emitChild(e.kids[0], me, false, out);
+        out += ' ' + leanOp(e.text) + ' ';
+        emitChild(e.kids[1], me, true, out);
         return;
     }
-    default:
-        return;  // tests never reach here: check.cpp keeps them out of value positions
+    // ---- bool-valued tests (check.cpp only lets these through where a `bool` is wanted) ----
+    case Expr::Kind::Cmp: {
+        const Type t = cmpType(e);
+        const std::string op = cmpSpelling(t, e.text);
+        if (cmpIsBool(t, e.text)) {  // Float ==, != are already `Bool`
+            emitChild(e.kids[0], 51, false, out);
+            out += ' ' + op + ' ';
+            emitChild(e.kids[1], 51, false, out);
+            return;
+        }
+        out += "decide (";
+        emitChild(e.kids[0], 51, false, out);
+        out += ' ' + op + ' ';
+        emitChild(e.kids[1], 51, false, out);
+        out += ')';
+        return;
+    }
+    case Expr::Kind::And:
+    case Expr::Kind::Or: {
+        const int me = level(e);
+        emitChild(e.kids[0], me, false, out);
+        out += e.kind == Expr::Kind::And ? " && " : " || ";
+        emitChild(e.kids[1], me, true, out);
+        return;
+    }
+    case Expr::Kind::Not:
+        out += "!";
+        emitAtom(e.kids[0], out);
+        return;
     }
 }
 
@@ -113,11 +180,10 @@ int condPrec(const Expr& e) {
 void emitCond(const Expr& e, std::string& out) {
     switch (e.kind) {
     case Expr::Kind::Cmp: {
-        emitExpr(e.kids[0], out);
-        out += ' ';
-        out += e.text == "==" ? "=" : e.text == "!=" ? "≠" : e.text;
-        out += ' ';
-        emitExpr(e.kids[1], out);
+        const Type t = cmpType(e);
+        emitChild(e.kids[0], 51, false, out);
+        out += ' ' + cmpSpelling(t, e.text) + ' ';
+        emitChild(e.kids[1], 51, false, out);
         return;
     }
     case Expr::Kind::And:
@@ -137,9 +203,11 @@ void emitCond(const Expr& e, std::string& out) {
         emitCond(e.kids[0], out);
         out += ')';
         return;
-    default:  // a number used as a test: C's "non-zero is true"
-        emitExpr(e, out);
-        out += truthSuffix(e.type);
+    default: {  // a value used as a test: C's "non-zero is true" (types.cpp decides the spelling)
+        std::string v;
+        emitExpr(e, v);
+        out += truthTest(e.type, v);
+    }
     }
 }
 

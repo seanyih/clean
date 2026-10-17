@@ -7,6 +7,8 @@
 
 #include "lexer.h"
 
+#include <cctype>
+
 namespace {
 
 bool isIdentStart(char c) {
@@ -29,7 +31,7 @@ std::string trimBlank(const std::string& s) {
 }
 
 const char* kSliceWhy =
-    "clean translates `int` and `unsigned` functions made of locals, assignments, `if`, "
+    "clean translates scalar functions made of locals, assignments, `if`, "
     "`switch` and `return` (see spec/impl-spec.md).";
 
 struct Lexer {
@@ -57,7 +59,8 @@ struct Lexer {
         throw DiagError("E000", file, Loc{l, c}, what, kSliceWhy, fix);
     }
 
-    // A `#…` line, including `\`-continuations. `#define NAME …` records NAME.
+    // A `#…` line, including `\`-continuations. `#define NAME …` records NAME;
+    // `#define NAME <integer literal>` also records the value (for `bv(NAME)`).
     void directive(LexResult& res) {
         step();  // '#'
         while (cur() == ' ' || cur() == '\t') step();
@@ -66,24 +69,36 @@ struct Lexer {
             word += cur();
             step();
         }
-        if (word == "define") {
-            while (cur() == ' ' || cur() == '\t') step();
-            std::string name;
-            while (isIdentChar(cur())) {
-                name += cur();
-                step();
-            }
-            if (!name.empty()) res.definedNames.insert(name);
-        }
-        while (!atEnd() && cur() != '\n') {  // rest of the line, honouring `\` continuations
+        std::string rest;  // the rest of the line, continuations joined
+        while (!atEnd() && cur() != '\n') {
             if (cur() == '\\' && peekAt(1) == '\n') {
                 step();
                 step();
+                rest += ' ';
             } else {
+                rest += cur();
                 step();
             }
         }
         if (!atEnd()) step();  // the newline itself
+        if (word != "define") return;
+        size_t k = 0;
+        while (k < rest.size() && (rest[k] == ' ' || rest[k] == '\t')) ++k;
+        size_t nameStart = k;
+        while (k < rest.size() && isIdentChar(rest[k])) ++k;
+        if (k == nameStart) return;
+        const std::string name = rest.substr(nameStart, k - nameStart);
+        res.definedNames.insert(name);
+        if (k < rest.size() && rest[k] == '(') return;  // function-like macro: no value
+        size_t cut = rest.find("//", k);
+        std::string body = trimBlank(rest.substr(k, cut == std::string::npos ? std::string::npos : cut - k));
+        bool lit = !body.empty();
+        if (lit && body.size() > 2 && body[0] == '0' && (body[1] == 'x' || body[1] == 'X')) {
+            for (size_t i = 2; i < body.size(); ++i) lit = lit && isHexDigit(body[i]);
+        } else {
+            for (char c : body) lit = lit && isDigit(c);
+        }
+        if (lit) res.definedValues[name] = body;
     }
 
     Token lineComment() {
@@ -152,10 +167,44 @@ struct Lexer {
                 fail(line, col, "binary literal contains a digit other than 0 or 1",
                      "fix the literal.");
         } else {
+            std::string intPart, frac, exp;
+            bool dot = false;
             while (isDigit(cur())) {
-                t.text += cur();
+                intPart += cur();
                 step();
             }
+            if (cur() == '.') {  // `1.5`, `1.`, `.5`
+                dot = true;
+                step();
+                while (isDigit(cur())) {
+                    frac += cur();
+                    step();
+                }
+            }
+            if ((cur() == 'e' || cur() == 'E') &&
+                (isDigit(peekAt(1)) || ((peekAt(1) == '+' || peekAt(1) == '-') && isDigit(peekAt(2))))) {
+                exp = "e";
+                step();
+                if (cur() == '+' || cur() == '-') {
+                    if (cur() == '-') exp += '-';
+                    step();
+                }
+                while (isDigit(cur())) {
+                    exp += cur();
+                    step();
+                }
+            }
+            if (dot || !exp.empty()) {  // a floating literal, in Lean's spelling
+                t.kind = Token::Kind::FloatLit;
+                t.text = (intPart.empty() ? "0" : intPart);
+                if (dot) t.text += "." + (frac.empty() ? "0" : frac);
+                t.text += exp;
+                if (cur() == 'f' || cur() == 'F' || cur() == 'l' || cur() == 'L') step();  // `1.5f`
+                if (isIdentChar(cur()))
+                    fail(line, col, "unsupported suffix on a floating literal", "write a plain literal.");
+                return t;
+            }
+            t.text = intPart;
         }
         if (isIdentChar(cur()))
             fail(line, col, "integer suffixes are not translated",
@@ -182,23 +231,62 @@ struct Lexer {
         return t;
     }
 
+    // `'a'` → `'a'`; escapes are re-spelled the way Lean writes them.
     Token charLit() {
         Token t;
-        t.kind = Token::Kind::Other;
-        t.text = "character literal";
+        t.kind = Token::Kind::CharLit;
         t.loc = {line, col};
         step();  // '\''
-        while (true) {
-            if (atEnd() || cur() == '\n')
-                fail(t.loc.line, t.loc.col, "unterminated character literal",
-                     "close it with `'`.");
-            if (cur() == '\'') {
-                step();
-                break;
+        std::string body;
+        if (atEnd() || cur() == '\n')
+            fail(t.loc.line, t.loc.col, "unterminated character literal", "close it with `'`.");
+        if (cur() == '\\') {
+            step();
+            char e = cur();
+            step();
+            switch (e) {
+            case 'n': body = "\\n"; break;
+            case 't': body = "\\t"; break;
+            case 'r': body = "\\r"; break;
+            case '\\': body = "\\\\"; break;
+            case '\'': body = "\\'"; break;
+            case '"': body = "\""; break;
+            case 'a': body = "\\x07"; break;
+            case 'b': body = "\\x08"; break;
+            case 'f': body = "\\x0c"; break;
+            case 'v': body = "\\x0b"; break;
+            default:
+                if (e >= '0' && e <= '7') {  // octal: up to three digits
+                    int v = e - '0';
+                    for (int k = 0; k < 2 && cur() >= '0' && cur() <= '7'; ++k) {
+                        v = v * 8 + (cur() - '0');
+                        step();
+                    }
+                    static const char* hex = "0123456789abcdef";
+                    body = std::string("\\x") + hex[(v >> 4) & 15] + hex[v & 15];
+                } else if (e == 'x' && isHexDigit(cur()) && isHexDigit(peekAt(1))) {
+                    body = std::string("\\x") + (char)std::tolower(cur()) + (char)std::tolower(peekAt(1));
+                    step();
+                    step();
+                } else {
+                    fail(t.loc.line, t.loc.col, "unsupported escape in a character literal",
+                         "use `\\n`, `\\t`, `\\0`, `\\xHH` or a plain character.");
+                }
             }
-            if (cur() == '\\' && peekAt(1) != '\0') step();
+        } else if (cur() == '\'') {
+            fail(t.loc.line, t.loc.col, "empty character literal", "write a character between the quotes.");
+        } else if ((unsigned char)cur() >= 0x80) {
+            fail(t.loc.line, t.loc.col, "non-ASCII character literal is not translated",
+                 "use an ASCII character or its number.");
+        } else {
+            body = std::string(1, cur());
             step();
         }
+        if (cur() != '\'')
+            fail(t.loc.line, t.loc.col, "multi-character literals are not translated",
+                 "a character literal holds exactly one character.");
+        step();
+        t.text = "'" + body + "'";
         return t;
     }
 
@@ -219,9 +307,9 @@ struct Lexer {
 LexResult lex(const std::string& source, const std::string& fileName) {
     LexResult res;
     Lexer L{source, fileName};
-    static const std::string kPunct = "(){}[],;:+-*/%<>=!";
-    static const char* const kTwoChar[] = {"<=", ">=", "==", "!=", "&&", "||", "++",
-                                           "--", "+=", "-=", "*=", "/=", "%="};
+    static const std::string kPunct = "(){}[],;:+-*/%<>=!&|^~";
+    static const char* const kTwoChar[] = {"<=", ">=", "==", "!=", "&&", "||", "++", "--", "+=",
+                                           "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^="};
 
     while (!L.atEnd()) {
         char c = L.cur();
@@ -249,7 +337,7 @@ LexResult lex(const std::string& source, const std::string& fileName) {
             res.tokens.push_back(L.charLit());
             continue;
         }
-        if (isDigit(c)) {
+        if (isDigit(c) || (c == '.' && isDigit(L.peekAt(1)))) {
             res.tokens.push_back(L.number());
             continue;
         }
@@ -259,6 +347,16 @@ LexResult lex(const std::string& source, const std::string& fileName) {
         }
         Token t;
         t.loc = {L.line, L.col};
+        if ((c == '<' && L.peekAt(1) == '<' && L.peekAt(2) == '=') ||
+            (c == '>' && L.peekAt(1) == '>' && L.peekAt(2) == '=')) {  // `<<=` `>>=`
+            t.kind = Token::Kind::Punct;
+            t.text = std::string{c, c, '='};
+            L.step();
+            L.step();
+            L.step();
+            res.tokens.push_back(t);
+            continue;
+        }
         bool two = false;
         for (const char* op : kTwoChar)
             if (c == op[0] && L.peekAt(1) == op[1]) two = true;

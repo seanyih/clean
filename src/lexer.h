@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -15,13 +16,16 @@
 #include "diag.h"
 
 struct Token {
-    enum class Kind { End, Ident, IntLit, Comment, Punct, Other };
+    enum class Kind { End, Ident, IntLit, FloatLit, CharLit, Comment, Punct, Other };
     Kind kind = Kind::End;
     // Ident   → the name
     // IntLit  → literal spelling ("42", "0xFF", "0b101")
+    // FloatLit→ Lean spelling of a floating literal ("1.5", "0.5", "2e3"; suffix dropped)
+    // CharLit → Lean spelling of a character literal, quotes included ("'a'", "'\\n'")
     // Comment → comment text without the // or /* */ delimiters (may span lines)
-    // Punct   → one of ( ) { } [ ] , ; : + - * / % < > = !
-    //           or a two-character operator: <= >= == != && || ++ -- += -= *= /= %=
+    // Punct   → one of ( ) { } [ ] , ; : + - * / % < > = ! & | ^ ~
+    //           or a two/three-character operator: <= >= == != && || ++ -- += -= *= /= %=
+    //           << >> &= |= ^= <<= >>=
     // Other   → something the lexer saw but this build does not translate
     //           (& | ? "x" 'c' . …); still a token so the parser can point at it
     std::string text;
@@ -32,6 +36,10 @@ struct Token {
 struct LexResult {
     std::vector<Token> tokens;
     std::set<std::string> definedNames;  // names seen in `#define NAME …`
+    // `#define NAME 8` — object-like macros whose whole body is one integer
+    // literal. Used only for `bv(NAME)` widths (E302 otherwise); using a macro
+    // anywhere else is still refused.
+    std::map<std::string, std::string> definedValues;
 };
 
 LexResult lex(const std::string& source, const std::string& fileName);
