@@ -1,21 +1,19 @@
 // parser.cpp — implementation of parser.h.
 //
-// Recursive descent over the slice-0 grammar. The second half is the
-// validation pass that runs after parsing: every identifier must be a
-// parameter or a defined function, and arities must match. All of this is
-// checked here so the emitted Lean has no name errors left to find. Order
-// is not checked: toposort.cpp reorders the definitions afterwards.
+// Recursive descent over the grammar in parser.h. It only builds the tree and
+// refuses what it cannot build; whether names exist, arities match and every
+// path returns is check.cpp's job. Two small desugarings happen here because
+// they are purely syntactic: `x += e` → `x = x + e`, and `x++;` → `x = x + 1`.
 
 #include "parser.h"
 
-#include <map>
 #include <utility>
 
 namespace {
 
 const char* kSliceWhy =
-    "clean is at slice 0: only `int` functions with a single `return <expr>;` "
-    "body are translated (see spec/impl-spec.md).";
+    "clean translates `int` functions built from locals, assignments, `if`, `switch` "
+    "and `return`; other statements arrive slice by slice (see spec/impl-spec.md).";
 
 // Names Lean reserves. Not exhaustive; it exists so a collision fails here,
 // loudly, instead of inside Lean (main-spec D8).
@@ -38,9 +36,18 @@ const std::set<std::string> kUntranslated = {
     "uint32_t", "uint64_t", "bv", "_BitVec",
 };
 
+// Statement keywords that come in a later slice.
+const std::set<std::string> kLaterStatements = {"while", "for", "do", "goto", "continue"};
+
+[[noreturn]] void failCode(const char* code, const std::string& file, Loc loc,
+                           const std::string& what, const std::string& why,
+                           const std::string& fix) {
+    throw DiagError(code, file, loc, what, why, fix);
+}
+
 [[noreturn]] void fail(const std::string& file, Loc loc, const std::string& what,
                        const std::string& why, const std::string& fix) {
-    throw DiagError("E000", file, loc, what, why, fix);
+    failCode("E000", file, loc, what, why, fix);
 }
 
 std::string describe(const Token& t) {
@@ -48,11 +55,29 @@ std::string describe(const Token& t) {
     case Token::Kind::End:     return "end of file";
     case Token::Kind::Ident:   return "`" + t.text + "`";
     case Token::Kind::IntLit:  return "literal `" + t.text + "`";
-    case Token::Kind::Comment:return "a comment";
+    case Token::Kind::Comment: return "a comment";
     case Token::Kind::Punct:   return "`" + t.text + "`";
     case Token::Kind::Other:   return "`" + t.text + "`";
     }
     return "";
+}
+
+// Binary operator precedence, loosest first (the C table).
+int binaryPrec(const std::string& op) {
+    if (op == "||") return 1;
+    if (op == "&&") return 2;
+    if (op == "==" || op == "!=") return 3;
+    if (op == "<" || op == "<=" || op == ">" || op == ">=") return 4;
+    if (op == "+" || op == "-") return 5;
+    if (op == "*" || op == "/" || op == "%") return 6;
+    return 0;
+}
+
+Expr::Kind binaryKind(const std::string& op) {
+    if (op == "||") return Expr::Kind::Or;
+    if (op == "&&") return Expr::Kind::And;
+    if (binaryPrec(op) == 3 || binaryPrec(op) == 4) return Expr::Kind::Cmp;
+    return Expr::Kind::Binary;
 }
 
 struct Parser {
@@ -70,11 +95,16 @@ struct Parser {
     bool isIdent(const std::string& s) const {
         return peek().kind == Token::Kind::Ident && peek().text == s;
     }
-    void next() {
-        if (!atEnd()) ++i;
-    }
     void skipComments() {
         while (peek().kind == Token::Kind::Comment) ++i;
+    }
+    std::vector<Comment> takeComments() {
+        std::vector<Comment> cs;
+        while (peek().kind == Token::Kind::Comment) {
+            cs.push_back({peek().text, peek().block});
+            ++i;
+        }
+        return cs;
     }
 
     [[noreturn]] void failHere(const std::string& what, const std::string& why,
@@ -84,8 +114,8 @@ struct Parser {
 
     void expectPunct(const std::string& p, const std::string& ctx) {
         if (!isPunct(p))
-            failHere("expected `" + p + "` " + ctx + ", found " + describe(peek()),
-                     kSliceWhy, "fix the C source; clean does not repair syntax.");
+            failHere("expected `" + p + "` " + ctx + ", found " + describe(peek()), kSliceWhy,
+                     "fix the C source; clean does not repair syntax.");
         ++i;
     }
 
@@ -106,21 +136,26 @@ struct Parser {
 
     // ---- expressions ---------------------------------------------------
 
-    Expr parseExpr() { return parseBinary(1); }
+    Expr parseExpr() {
+        Expr e = parseBinary(1);
+        if (isPunct("="))  // `if (x = 1)`, `return x = 2;`, `f(a = b)`
+            failCode("E103", file, peek().loc, "assignment used as an expression",
+                     "Lean has no assignment expressions; assignments are statements.",
+                     "split it into a separate statement.");
+        return e;
+    }
 
     Expr parseBinary(int minPrec) {
         Expr lhs = parseUnary();
         while (true) {
             const Token& op = peek();
             if (op.kind != Token::Kind::Punct) break;
-            int p = 0;
-            if (op.text == "+" || op.text == "-") p = 1;
-            else if (op.text == "*" || op.text == "/" || op.text == "%") p = 2;
-            if (p < minPrec) break;
+            int p = binaryPrec(op.text);
+            if (p == 0 || p < minPrec) break;
             ++i;
             Expr rhs = parseBinary(p + 1);
             Expr e;
-            e.kind = Expr::Kind::Binary;
+            e.kind = binaryKind(op.text);
             e.text = op.text;
             e.loc = lhs.loc;
             e.kids.push_back(std::move(lhs));
@@ -130,16 +165,25 @@ struct Parser {
         return lhs;
     }
 
+    [[noreturn]] void failIncDec() {
+        failCode("E110", file, peek().loc, "`" + peek().text + "` inside an expression",
+                 "an increment has a side effect, and Lean expressions have none.",
+                 "write it as a separate statement (`x++;` or `x += 1;`).");
+    }
+
     Expr parseUnary() {
-        if (isPunct("-")) {
+        if (isPunct("++") || isPunct("--")) failIncDec();
+        if (isPunct("-") || isPunct("!")) {
             Token op = toks[i++];
             Expr e;
-            e.kind = Expr::Kind::UnaryNeg;
+            e.kind = op.text == "-" ? Expr::Kind::UnaryNeg : Expr::Kind::Not;
             e.loc = op.loc;
             e.kids.push_back(parseUnary());
             return e;
         }
-        return parsePrimary();
+        Expr e = parsePrimary();
+        if (isPunct("++") || isPunct("--")) failIncDec();
+        return e;
     }
 
     Expr parsePrimary() {
@@ -188,7 +232,274 @@ struct Parser {
             return e;
         }
         failHere("expected an expression, found " + describe(peek()), kSliceWhy,
-                 "slice-0 expressions are literals, names, calls, and + - * / % with parentheses.");
+                 "expressions are literals, names, calls, arithmetic, and (in conditions) "
+                 "comparisons with && || !.");
+    }
+
+    // ---- statements ----------------------------------------------------
+
+    // `( expr )` after `if` / `switch`.
+    Expr parseParenExpr(const std::string& what) {
+        expectPunct("(", "after `" + what + "`");
+        Expr e = parseExpr();
+        expectPunct(")", "to close the `" + what + "` condition");
+        return e;
+    }
+
+    Stmt makeAssign(const Token& name, Expr rhs) {
+        Stmt s;
+        s.kind = Stmt::Kind::Assign;
+        s.name = name.text;
+        s.expr = std::move(rhs);
+        s.loc = name.loc;
+        return s;
+    }
+
+    // `x = e;`  `x += e;`  `x++;`
+    Stmt parseAssignment() {
+        Token name = toks[i++];
+        auto var = [&]() {
+            Expr v;
+            v.kind = Expr::Kind::Ident;
+            v.text = name.text;
+            v.loc = name.loc;
+            return v;
+        };
+        if (isPunct("++") || isPunct("--")) {
+            std::string op = peek().text.substr(0, 1);
+            ++i;
+            expectPunct(";", "after `" + name.text + op + op + "`");
+            Expr one;
+            one.kind = Expr::Kind::IntLit;
+            one.text = "1";
+            one.loc = name.loc;
+            Expr bin;
+            bin.kind = Expr::Kind::Binary;
+            bin.text = op;
+            bin.loc = name.loc;
+            bin.kids.push_back(var());
+            bin.kids.push_back(std::move(one));
+            return makeAssign(name, std::move(bin));
+        }
+        std::string op = peek().text;
+        ++i;
+        Expr rhs = parseExpr();
+        expectPunct(";", "after the assignment to `" + name.text + "`");
+        if (op != "=") {  // compound: x += e  →  x = x + e
+            Expr bin;
+            bin.kind = Expr::Kind::Binary;
+            bin.text = op.substr(0, 1);
+            bin.loc = name.loc;
+            bin.kids.push_back(var());
+            bin.kids.push_back(std::move(rhs));
+            rhs = std::move(bin);
+        }
+        return makeAssign(name, std::move(rhs));
+    }
+
+    bool atAssignment() const {
+        if (peek().kind != Token::Kind::Ident || peek2().kind != Token::Kind::Punct) return false;
+        const std::string& t = peek2().text;
+        return t == "=" || t == "+=" || t == "-=" || t == "*=" || t == "/=" || t == "%=" ||
+               t == "++" || t == "--";
+    }
+
+    // The body of `if` / `else`: a braced block or one statement.
+    std::vector<Stmt> parseBody() {
+        if (isPunct("{")) return parseBlock();
+        if (isPunct(";")) {  // `if (c) ;`
+            ++i;
+            return {};
+        }
+        if (isIdent("int"))
+            failHere("a declaration cannot be the only statement of an `if`/`else`",
+                     "its scope would end immediately; C itself rejects it.",
+                     "wrap it in braces or drop it.");
+        std::vector<Stmt> body;
+        body.push_back(parseStmt());
+        return body;
+    }
+
+    std::vector<Stmt> parseBlock() {
+        expectPunct("{", "to open a block");
+        std::vector<Stmt> body = parseStmtList(false);
+        expectPunct("}", "to close the block");
+        return body;
+    }
+
+    Stmt parseIf() {
+        Stmt s;
+        s.kind = Stmt::Kind::If;
+        s.loc = peek().loc;
+        ++i;  // `if`
+        s.expr = parseParenExpr("if");
+        s.body = parseBody();
+        size_t save = i;  // an `else` may follow after comments
+        skipComments();
+        if (isIdent("else")) {
+            ++i;
+            s.elseBody = parseBody();
+        } else {
+            i = save;  // those comments belong to whatever comes next
+        }
+        return s;
+    }
+
+    // `case` labels are integer literals (enum constants arrive with enums).
+    Expr parseCaseLabel() {
+        Expr e = parseUnary();
+        bool lit = e.kind == Expr::Kind::IntLit ||
+                   (e.kind == Expr::Kind::UnaryNeg && e.kids[0].kind == Expr::Kind::IntLit);
+        if (!lit)
+            fail(file, e.loc, "a `case` label must be an integer literal",
+                 "named constants and expressions in labels arrive with enums and macros.",
+                 "write the number (`case 3:` or `case -1:`).");
+        return e;
+    }
+
+    Stmt parseSwitch() {
+        Stmt s;
+        s.kind = Stmt::Kind::Switch;
+        s.loc = peek().loc;
+        ++i;  // `switch`
+        s.expr = parseParenExpr("switch");
+        expectPunct("{", "to open the switch body");
+        while (true) {
+            skipComments();
+            if (isPunct("}")) break;
+            if (!isIdent("case") && !isIdent("default"))
+                failHere("expected `case` or `default`, found " + describe(peek()),
+                         "a switch body is a list of `case`/`default` groups.",
+                         "put statements under a `case N:` label.");
+            Case c;
+            c.loc = peek().loc;
+            while (true) {  // consecutive labels share one group
+                if (isIdent("case")) {
+                    ++i;
+                    c.labels.push_back(parseCaseLabel());
+                } else {
+                    ++i;  // `default`
+                    c.isDefault = true;
+                }
+                expectPunct(":", "after the label");
+                size_t save = i;
+                skipComments();
+                if (isIdent("case") || isIdent("default")) continue;
+                i = save;  // those comments belong to the first statement
+                break;
+            }
+            c.body = parseStmtList(true);
+            while (true) {  // `case 1: { … break; }` and `case 1: { … } break;` are common styles
+                if (c.body.size() == 1 && c.body[0].kind == Stmt::Kind::Block) {
+                    Stmt block = std::move(c.body[0]);  // the case body is its own scope anyway
+                    c.body = std::move(block.body);
+                    if (!c.body.empty())
+                        c.body[0].comments.insert(c.body[0].comments.begin(),
+                                                  block.comments.begin(), block.comments.end());
+                } else if (!c.endsInBreak && !c.body.empty() &&
+                           c.body.back().kind == Stmt::Kind::Break) {
+                    c.body.pop_back();
+                    c.endsInBreak = true;
+                } else {
+                    break;
+                }
+            }
+            s.cases.push_back(std::move(c));
+        }
+        expectPunct("}", "to close the switch body");
+        return s;
+    }
+
+    Stmt parseStmt() {
+        Stmt s;
+        s.loc = peek().loc;
+        if (isPunct("{")) {
+            s.kind = Stmt::Kind::Block;
+            s.body = parseBlock();
+            return s;
+        }
+        if (peek().kind != Token::Kind::Ident)
+            failHere("expected a statement, found " + describe(peek()), kSliceWhy,
+                     "see spec/impl-spec.md for the statements that are translated.");
+        const std::string w = peek().text;
+        if (w == "return") {
+            ++i;
+            s.kind = Stmt::Kind::Return;
+            s.expr = parseExpr();
+            expectPunct(";", "after the return expression");
+            return s;
+        }
+        if (w == "int") {
+            ++i;
+            Token name = expectIdent("a variable name");
+            checkName(name);
+            s.kind = Stmt::Kind::Decl;
+            s.name = name.text;
+            s.loc = name.loc;
+            if (isPunct(";") || isPunct(","))
+                fail(file, name.loc, "local `" + name.text + "` has no initial value",
+                     "Lean has no uninitialised variables, and picking a value would be guessing (D5).",
+                     "give it one: `int " + name.text + " = 0;`.");
+            expectPunct("=", "after the name of the local `" + name.text + "`");
+            s.expr = parseExpr();
+            expectPunct(";", "after the declaration of `" + name.text + "`");
+            return s;
+        }
+        if (w == "if") return parseIf();
+        if (w == "switch") return parseSwitch();
+        if (w == "break") {
+            ++i;
+            expectPunct(";", "after `break`");
+            s.kind = Stmt::Kind::Break;
+            return s;
+        }
+        if (kLaterStatements.count(w))
+            failHere("`" + w + "` is not translated in this slice",
+                     "loops arrive in a later slice (see the plan in spec/impl-spec.md).",
+                     "write the computation without loops for now.");
+        if (kUntranslated.count(w))
+            failHere("type `" + w + "` is not translated in this slice",
+                     "`" + w + "` exists in the main spec but is not translated yet.",
+                     "use `int` for now; the type table grows slice by slice.");
+        if (atAssignment()) return parseAssignment();
+        if (peek2().kind == Token::Kind::Punct && peek2().text == "(")
+            failHere("call statement `" + w + "(…);` has no effect here",
+                     "functions are pure in Lean; a discarded result does nothing "
+                     "(effects arrive with `printf` and IO).",
+                     "use the value: `int r = " + w + "(…);`.");
+        failHere("expected a statement, found " + describe(peek()), kSliceWhy,
+                 "see spec/impl-spec.md for the statements that are translated.");
+    }
+
+    // Statements up to the closing `}` (or, in a switch, the next label).
+    std::vector<Stmt> parseStmtList(bool inSwitch) {
+        std::vector<Stmt> list;
+        while (true) {
+            std::vector<Comment> cs = takeComments();
+            if (atEnd() || isPunct("}")) break;
+            if (inSwitch && (isIdent("case") || isIdent("default"))) break;
+            if (isPunct(";")) {  // empty statement
+                ++i;
+                continue;
+            }
+            Stmt s = parseStmt();
+            s.comments = std::move(cs);
+            list.push_back(std::move(s));
+        }
+        return list;
+    }
+
+    // A `break` that is not the closing statement of a switch group.
+    void rejectStrayBreak(const std::vector<Stmt>& list) {
+        for (const Stmt& s : list) {
+            if (s.kind == Stmt::Kind::Break)
+                fail(file, s.loc, "`break` is only translated as the last statement of a switch case",
+                     "without loops, a `break` elsewhere would need an early exit that is not built yet.",
+                     "restructure with `if`/`else`, or end the case with `break;`.");
+            rejectStrayBreak(s.body);
+            rejectStrayBreak(s.elseBody);
+            for (const Case& c : s.cases) rejectStrayBreak(c.body);
+        }
     }
 
     // ---- declarations --------------------------------------------------
@@ -203,7 +514,7 @@ struct Parser {
         while (true) {
             if (!isIdent("int"))
                 failHere("expected an `int` parameter, found " + describe(peek()),
-                         "slice-0 parameters are `int` only (→ Lean `Int`).",
+                         "parameters are `int` only (→ Lean `Int`) in this slice.",
                          "use `int`; other types arrive slice by slice (spec/impl-spec.md).");
             ++i;
             Token name = expectIdent("a parameter name");
@@ -218,6 +529,28 @@ struct Parser {
         return params;
     }
 
+    // `[[lean::partial]]` (main-spec §3.1). Returns true for `partial`.
+    bool parseAttribute() {
+        Loc at = peek().loc;
+        ++i;
+        ++i;  // `[[`
+        Token ns = expectIdent("an attribute namespace");
+        if (ns.text != "lean")
+            fail(file, ns.loc, "unknown attribute namespace `" + ns.text + "`",
+                 "clean only knows `lean::…` attributes.", "write `[[lean::partial]]`.");
+        expectPunct(":", "in `lean::…`");
+        expectPunct(":", "in `lean::…`");
+        Token name = expectIdent("an attribute name");
+        expectPunct("]", "to close the attribute");
+        expectPunct("]", "to close the attribute");
+        if (name.text == "partial") return true;
+        if (name.text == "inline" || name.text == "nosynth" || name.text == "name")
+            fail(file, at, "attribute `lean::" + name.text + "` is not translated yet",
+                 "only `lean::partial` exists in this build.", "remove it for now.");
+        fail(file, name.loc, "unknown attribute `lean::" + name.text + "`",
+             "main-spec §3.1 lists partial, inline, nosynth, name.", "fix the spelling.");
+    }
+
     // The `int`, the name, the parameter list are already consumed by the caller.
     Function parseFunction(std::string name, int defLine,
                            std::vector<std::pair<std::string, std::string>> params,
@@ -228,67 +561,12 @@ struct Parser {
         f.params = std::move(params);
         f.comments = std::move(comments);
         expectPunct("{", "to open the body of `" + f.name + "`");
-        skipComments();  // comments inside bodies are dropped in this slice (impl-spec)
-        if (!isIdent("return"))
-            failHere("the body of `" + f.name + "` must be a single `return <expr>;` in this slice",
-                     "statements (locals, `if`, loops, …) are translated from the next slice on.",
-                     "write the body as one return expression for now.");
-        ++i;
-        f.body = parseExpr();
-        expectPunct(";", "after the return expression");
-        skipComments();
+        f.body = parseStmtList(false);
         expectPunct("}", "to close the body of `" + f.name + "`");
+        rejectStrayBreak(f.body);
         return f;
     }
 };
-
-// ---- validation pass ----------------------------------------------------
-
-// Every name the emitted Lean will mention must be known: parameters are
-// values and functions are called with the right arity. (Definition order is
-// fixed later by toposort.cpp, so a callee may sit above or below its caller.)
-void checkExpr(const Expr& e, const std::string& file, const std::set<std::string>& params,
-               const std::map<std::string, size_t>& sigs) {
-    switch (e.kind) {
-    case Expr::Kind::IntLit:
-        return;
-    case Expr::Kind::Ident:
-        if (params.count(e.text)) return;
-        if (sigs.count(e.text))
-            fail(file, e.loc, "function `" + e.text + "` is used as a value",
-                 "slice 0 has no function values (function pointers are ⛔ in the main spec).",
-                 "call it: `" + e.text + "(…)`, or pass an argument.");
-        fail(file, e.loc, "`" + e.text + "` is neither a parameter nor a defined function",
-             "clean rejects unknown names instead of emitting Lean that fails later (D5).",
-             "declare it, define it, or fix the typo.");
-    case Expr::Kind::UnaryNeg:
-        checkExpr(e.kids[0], file, params, sigs);
-        return;
-    case Expr::Kind::Binary:
-        checkExpr(e.kids[0], file, params, sigs);
-        checkExpr(e.kids[1], file, params, sigs);
-        return;
-    case Expr::Kind::Call: {
-        if (params.count(e.text))
-            fail(file, e.loc, "parameter `" + e.text + "` is called like a function",
-                 "function values are not translated in this slice.",
-                 "call a defined function, or drop the call.");
-        auto it = sigs.find(e.text);
-        if (it == sigs.end())
-            fail(file, e.loc, "`" + e.text + "` is called but not defined in this file",
-                 "slice 0 resolves calls inside the file; `extern` declarations come later.",
-                 "define `" + e.text + "` in the same file.");
-        if (it->second != e.kids.size())
-            fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second) +
-                     " argument(s) but is called with " + std::to_string(e.kids.size()),
-                 "the arity is checked here so that Lean does not have to report it.",
-                 "match the parameter list.");
-        for (const Expr& a : e.kids)
-            checkExpr(a, file, params, sigs);
-        return;
-    }
-    }
-}
 
 }  // namespace
 
@@ -301,23 +579,28 @@ TranslationUnit parse(const std::vector<Token>& tokens,
 
     std::vector<Comment> pending;  // comments waiting for the next definition
     while (true) {
-        while (p.peek().kind == Token::Kind::Comment) {
-            pending.push_back({p.peek().text, p.peek().block});
-            ++p.i;
-        }
+        for (Comment& c : p.takeComments()) pending.push_back(std::move(c));
         if (p.atEnd()) break;
         if (p.isPunct(";")) {  // stray semicolon at file scope (C23 allows it)
             ++p.i;
             continue;
         }
+        bool isPartial = false;
+        Loc attrLoc = p.peek().loc;
+        bool hasAttr = false;
+        while (p.isPunct("[") && p.peek2().kind == Token::Kind::Punct && p.peek2().text == "[") {
+            isPartial = p.parseAttribute() || isPartial;
+            hasAttr = true;
+            for (Comment& c : p.takeComments()) pending.push_back(std::move(c));
+        }
         if (p.peek().kind != Token::Kind::Ident)
             p.failHere("expected a declaration, found " + describe(p.peek()), kSliceWhy,
-                       "slice-0 files contain `int` functions; see spec/impl-spec.md.");
+                       "files contain `int` functions; see spec/impl-spec.md.");
         if (p.peek().text != "int") {
             std::string ty = p.peek().text;
             std::string why = kUntranslated.count(ty)
                 ? "`" + ty + "` exists in the main spec but is not translated in this slice."
-                : "slice 0 translates only `int` functions.";
+                : "only `int` functions are translated in this slice.";
             p.failHere("type `" + ty + "` is not translated in this slice", why,
                        "use `int` for now; the type table grows slice by slice (spec/impl-spec.md).");
         }
@@ -329,26 +612,17 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         auto params = p.parseParams();
         p.expectPunct(")", "to close the parameter list of `" + name.text + "`");
         if (p.isPunct(";")) {  // prototype: dropped (§7.1)
+            if (hasAttr)
+                fail(fileName, attrLoc, "an attribute on the prototype of `" + name.text + "`",
+                     "prototypes are dropped, so the attribute would be silently lost.",
+                     "put the attribute on the definition.");
             ++p.i;
             continue;
         }
-        unit.functions.push_back(
-            p.parseFunction(name.text, defLine, std::move(params), std::move(pending)));
+        Function f = p.parseFunction(name.text, defLine, std::move(params), std::move(pending));
+        f.isPartial = isPartial;
+        unit.functions.push_back(std::move(f));
         pending.clear();
-    }
-
-    // Name and arity checks over the parsed tree.
-    std::map<std::string, size_t> sigs;  // name → arity
-    for (const Function& f : unit.functions) {
-        if (sigs.count(f.name))
-            fail(fileName, Loc{f.defLine, 1}, "function `" + f.name + "` is defined twice",
-                 "Lean allows only one definition per name.", "rename one of them.");
-        sigs[f.name] = f.params.size();
-    }
-    for (const Function& f : unit.functions) {
-        std::set<std::string> params;
-        for (const auto& pr : f.params) params.insert(pr.second);
-        checkExpr(f.body, fileName, params, sigs);
     }
     return unit;
 }

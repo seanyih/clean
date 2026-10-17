@@ -2,13 +2,23 @@
 // honest (D5/D8: reject, never guess).
 //
 // Layer: front-end. Input: tokens and the #define'd names. Output: a
-// TranslationUnit. Slice-0 grammar, in full:
+// TranslationUnit (syntax only: whether names exist etc. is check.h). Grammar:
 //
 //   file      :=  ( comment | ';' | prototype | function )*  EOF
 //   prototype :=  'int' IDENT '(' params ')' ';'
-//   function  :=  'int' IDENT '(' params ')' '{' 'return' expr ';' '}'
+//   function  :=  attr* 'int' IDENT '(' params ')' block
+//   attr      :=  '[[' 'lean' '::' 'partial' ']]'
 //   params    :=  'void' | ε | 'int' IDENT ( ',' 'int' IDENT )*
-//   expr      :=  additive with C precedence over + - * / % and unary '-'
+//   block     :=  '{' stmt* '}'
+//   stmt      :=  'int' IDENT '=' expr ';'              local
+//              |  IDENT ('=' | '+=' | '-=' | '*=' | '/=' | '%=') expr ';'
+//              |  IDENT ('++' | '--') ';'
+//              |  'if' '(' expr ')' body [ 'else' body ]
+//              |  'switch' '(' expr ')' '{' group* '}'
+//              |  'return' expr ';'  |  'break' ';'  |  block  |  ';'
+//   body      :=  block | stmt
+//   group     :=  ( 'case' ['-'] INTLIT ':' | 'default' ':' )+ stmt*
+//   expr      :=  C precedence:  ||  &&  == !=  < <= > >=  + -  * / %  unary - !
 //   primary   :=  INTLIT | IDENT | IDENT '(' args ')' | '(' expr ')'
 //
 // Prototypes are dropped (main-spec §7.1). Everything else is a diagnostic.

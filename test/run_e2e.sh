@@ -8,6 +8,9 @@
 #      the combined file with `lean` — skipped, with a notice, if absent.
 # For every test/cases-should-fail/*.c:
 #   expect the translator to exit 1 with a diagnostic on stderr.
+# For every test/cases-lean-rejects/*.c:
+#   the translator must SUCCEED and `lean` must then REJECT the output (code
+#   whose legality only Lean can judge, e.g. unproven termination).
 
 set -u
 
@@ -15,6 +18,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bin="$root/release/clean"
 cases="$root/test/cases"
 fails="$root/test/cases-should-fail"
+rejects="$root/test/cases-lean-rejects"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -74,6 +78,30 @@ for src in "$fails"/*.c; do
     fi
     echo "PASS $name (rejected as expected)"
     sed 's/^/    /' "$tmp/$name.log" | head -4
+    pass=$((pass + 1))
+done
+
+for src in "$rejects"/*.c; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src" .c)"
+
+    if ! "$bin" "$src" -o "$tmp/$name.lean" > "$tmp/$name.log" 2>&1; then
+        echo "FAIL $name: translator should accept this and leave the verdict to Lean"
+        sed 's/^/    /' "$tmp/$name.log"
+        fail=$((fail + 1))
+        continue
+    fi
+    if [ "$have_lean" = 0 ]; then
+        echo "SKIP $name (lean not installed)"
+        continue
+    fi
+    if lean "$tmp/$name.lean" > "$tmp/$name.leancheck.log" 2>&1; then
+        echo "FAIL $name: lean accepted code it should reject"
+        fail=$((fail + 1))
+        continue
+    fi
+    echo "PASS $name (translated, then rejected by Lean as expected)"
+    grep -m1 'error' "$tmp/$name.leancheck.log" | sed 's/^/    /'
     pass=$((pass + 1))
 done
 

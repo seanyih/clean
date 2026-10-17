@@ -29,8 +29,8 @@ std::string trimBlank(const std::string& s) {
 }
 
 const char* kSliceWhy =
-    "clean is at slice 0: input files may contain # lines, comments and `int` "
-    "functions with a single `return` statement (see spec/impl-spec.md).";
+    "clean translates `int` functions made of locals, assignments, `if`, `switch` and "
+    "`return` (see spec/impl-spec.md).";
 
 struct Lexer {
     const std::string& src;
@@ -219,7 +219,9 @@ struct Lexer {
 LexResult lex(const std::string& source, const std::string& fileName) {
     LexResult res;
     Lexer L{source, fileName};
-    static const std::string kPunct = "(){},;+-*/%";
+    static const std::string kPunct = "(){}[],;:+-*/%<>=!";
+    static const char* const kTwoChar[] = {"<=", ">=", "==", "!=", "&&", "||", "++",
+                                           "--", "+=", "-=", "*=", "/=", "%="};
 
     while (!L.atEnd()) {
         char c = L.cur();
@@ -257,6 +259,17 @@ LexResult lex(const std::string& source, const std::string& fileName) {
         }
         Token t;
         t.loc = {L.line, L.col};
+        bool two = false;
+        for (const char* op : kTwoChar)
+            if (c == op[0] && L.peekAt(1) == op[1]) two = true;
+        if (two) {  // `<=`, `&&`, `++`, `+=` …
+            t.kind = Token::Kind::Punct;
+            t.text = std::string{c, L.peekAt(1)};
+            L.step();
+            L.step();
+            res.tokens.push_back(t);
+            continue;
+        }
         t.kind = kPunct.find(c) != std::string::npos ? Token::Kind::Punct : Token::Kind::Other;
         t.text = std::string(1, c);
         L.step();

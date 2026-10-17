@@ -3,7 +3,7 @@
 // Layer: front-end. Input: the whole file as text. Output: a Token list.
 // Preprocessor lines (#include, #define, …) are consumed here and never
 // tokenized; `#define`d names are collected so the parser can reject their
-// use — slice 0 does not expand macros, and silently emitting a macro name
+// use — macros are not expanded, and silently emitting a macro name
 // as a Lean identifier would produce broken Lean (D5).
 
 #pragma once
@@ -20,9 +20,10 @@ struct Token {
     // Ident   → the name
     // IntLit  → literal spelling ("42", "0xFF", "0b101")
     // Comment → comment text without the // or /* */ delimiters (may span lines)
-    // Punct   → one of ( ) { } , ; + - * / %
-    // Other   → something the lexer saw but slice 0 does not translate
-    //           (= < "x" 'c' [ ] . …); still a token so the parser can point at it
+    // Punct   → one of ( ) { } [ ] , ; : + - * / % < > = !
+    //           or a two-character operator: <= >= == != && || ++ -- += -= *= /= %=
+    // Other   → something the lexer saw but this build does not translate
+    //           (& | ? "x" 'c' . …); still a token so the parser can point at it
     std::string text;
     Loc loc;
     bool block = false;  // Comment only: true for `/* … */`, false for `// …`
