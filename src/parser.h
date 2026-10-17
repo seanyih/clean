@@ -5,12 +5,13 @@
 // TranslationUnit (syntax only: whether names exist etc. is check.h). Grammar:
 //
 //   file      :=  ( comment | ';' | prototype | function )*  EOF
-//   prototype :=  'int' IDENT '(' params ')' ';'
-//   function  :=  attr* 'int' IDENT '(' params ')' block
+//   prototype :=  type IDENT '(' params ')' ';'
+//   function  :=  attr* type IDENT '(' params ')' block
 //   attr      :=  '[[' 'lean' '::' 'partial' ']]'
-//   params    :=  'void' | ε | 'int' IDENT ( ',' 'int' IDENT )*
+//   type      :=  'int' | 'unsigned' 'int'?        → Lean `Int` / `Nat` (main-spec §4.1)
+//   params    :=  'void' | ε | type IDENT ( ',' type IDENT )*
 //   block     :=  '{' stmt* '}'
-//   stmt      :=  'int' IDENT '=' expr ';'              local
+//   stmt      :=  type IDENT '=' expr ';'              local
 //              |  IDENT ('=' | '+=' | '-=' | '*=' | '/=' | '%=') expr ';'
 //              |  IDENT ('++' | '--') ';'
 //              |  'if' '(' expr ')' body [ 'else' body ]

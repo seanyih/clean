@@ -12,8 +12,9 @@
 namespace {
 
 const char* kSliceWhy =
-    "clean translates `int` functions built from locals, assignments, `if`, `switch` "
-    "and `return`; other statements arrive slice by slice (see spec/impl-spec.md).";
+    "clean translates `int` and `unsigned` functions built from locals, assignments, `if`, "
+    "`switch` and `return`; other statements and types arrive slice by slice "
+    "(see spec/impl-spec.md).";
 
 // Names Lean reserves. Not exhaustive; it exists so a collision fails here,
 // loudly, instead of inside Lean (main-spec D8).
@@ -29,7 +30,7 @@ const std::set<std::string> kLeanKeywords = {
 // C type / storage-class spellings this build does not translate yet. Better
 // a pointed refusal than a bare "expected a declaration".
 const std::set<std::string> kUntranslated = {
-    "void", "char", "signed", "unsigned", "short", "long", "float", "double",
+    "void", "char", "signed", "short", "long", "float", "double",
     "bool", "_Bool", "size_t", "struct", "union", "enum", "typedef", "const",
     "static", "extern", "inline", "restrict", "volatile", "register",
     "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t",
@@ -132,6 +133,50 @@ struct Parser {
             fail(file, t.loc, "`" + t.text + "` is reserved by Lean and cannot be used as a name",
                  "the translator preserves names verbatim (D8), and this one would break the output.",
                  "rename the identifier in the C source.");
+    }
+
+    // The C scalar types this build translates (main-spec §4.1, the rows built
+    // so far): `int` → Lean `Int`, `unsigned` (or `unsigned int`) → `Nat`.
+    // Returns the spelling the AST stores: "int" / "unsigned".
+    std::string parseCType() {
+        const Token& t = peek();
+        if (t.kind != Token::Kind::Ident)
+            failHere("expected a type, found " + describe(peek()), kSliceWhy,
+                     "write `int` or `unsigned`; see spec/impl-spec.md.");
+        if (t.text == "int") {
+            ++i;
+            return "int";
+        }
+        if (t.text == "unsigned") {
+            ++i;
+            if (isIdent("int")) ++i;  // `unsigned int` — the same type
+            if (peek().kind == Token::Kind::Ident && kUntranslated.count(peek().text))
+                failHere("type `unsigned " + peek().text + "` is not translated in this slice",
+                         "only plain `unsigned` is; the main spec maps the other unsigned "
+                         "spellings to `Nat` too, but they arrive with the rest of the table.",
+                         "write plain `unsigned` (→ `Nat`) or `int` for now.");
+            return "unsigned";
+        }
+        if (kUntranslated.count(t.text))
+            failHere("type `" + t.text + "` is not translated in this slice",
+                     "`" + t.text + "` exists in the main spec but is not translated in this slice.",
+                     "use `int` or `unsigned` for now; the type table grows slice by slice.");
+        failHere("expected a type, found " + describe(peek()),
+                 "only `int` (→ Lean `Int`) and `unsigned` (→ `Nat`) are translated in this slice.",
+                 "write `int` or `unsigned`; the type table grows slice by slice.");
+    }
+
+    // A name in declaration position (`int int f()`, `unsigned unsigned x = 1;`).
+    // Type words are rejected or the emitter would print a C keyword where the
+    // output needs an identifier.
+    Token expectName(const std::string& ctx) {
+        if (peek().kind == Token::Kind::Ident &&
+            (peek().text == "int" || peek().text == "unsigned" ||
+             kUntranslated.count(peek().text)))
+            failHere("expected " + ctx + ", found `" + peek().text + "`",
+                     "`" + peek().text + "` names a type in C, not a variable or function.",
+                     "name it something else.");
+        return expectIdent(ctx);
     }
 
     // ---- expressions ---------------------------------------------------
@@ -311,7 +356,7 @@ struct Parser {
             ++i;
             return {};
         }
-        if (isIdent("int"))
+        if (isIdent("int") || isIdent("unsigned"))
             failHere("a declaration cannot be the only statement of an `if`/`else`",
                      "its scope would end immediately; C itself rejects it.",
                      "wrap it in braces or drop it.");
@@ -429,9 +474,9 @@ struct Parser {
             expectPunct(";", "after the return expression");
             return s;
         }
-        if (w == "int") {
-            ++i;
-            Token name = expectIdent("a variable name");
+        if (w == "int" || w == "unsigned") {
+            s.type = parseCType();
+            Token name = expectName("a variable name");
             checkName(name);
             s.kind = Stmt::Kind::Decl;
             s.name = name.text;
@@ -439,7 +484,7 @@ struct Parser {
             if (isPunct(";") || isPunct(","))
                 fail(file, name.loc, "local `" + name.text + "` has no initial value",
                      "Lean has no uninitialised variables, and picking a value would be guessing (D5).",
-                     "give it one: `int " + name.text + " = 0;`.");
+                     "give it one: `" + s.type + " " + name.text + " = 0;`.");
             expectPunct("=", "after the name of the local `" + name.text + "`");
             s.expr = parseExpr();
             expectPunct(";", "after the declaration of `" + name.text + "`");
@@ -512,14 +557,10 @@ struct Parser {
         }
         if (isPunct(")")) return params;  // `f()`
         while (true) {
-            if (!isIdent("int"))
-                failHere("expected an `int` parameter, found " + describe(peek()),
-                         "parameters are `int` only (→ Lean `Int`) in this slice.",
-                         "use `int`; other types arrive slice by slice (spec/impl-spec.md).");
-            ++i;
-            Token name = expectIdent("a parameter name");
+            std::string ty = parseCType();
+            Token name = expectName("a parameter name");
             checkName(name);
-            params.emplace_back("int", name.text);
+            params.emplace_back(ty, name.text);
             if (isPunct(",")) {
                 ++i;
                 continue;
@@ -595,18 +636,10 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         }
         if (p.peek().kind != Token::Kind::Ident)
             p.failHere("expected a declaration, found " + describe(p.peek()), kSliceWhy,
-                       "files contain `int` functions; see spec/impl-spec.md.");
-        if (p.peek().text != "int") {
-            std::string ty = p.peek().text;
-            std::string why = kUntranslated.count(ty)
-                ? "`" + ty + "` exists in the main spec but is not translated in this slice."
-                : "only `int` functions are translated in this slice.";
-            p.failHere("type `" + ty + "` is not translated in this slice", why,
-                       "use `int` for now; the type table grows slice by slice (spec/impl-spec.md).");
-        }
+                       "files contain `int` and `unsigned` functions; see spec/impl-spec.md.");
         int defLine = p.peek().loc.line;
-        ++p.i;  // `int`
-        Token name = p.expectIdent("a function name");
+        std::string retType = p.parseCType();
+        Token name = p.expectName("a function name");
         p.checkName(name);
         p.expectPunct("(", "to open the parameter list of `" + name.text + "`");
         auto params = p.parseParams();
@@ -621,6 +654,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         }
         Function f = p.parseFunction(name.text, defLine, std::move(params), std::move(pending));
         f.isPartial = isPartial;
+        f.retType = retType;
         unit.functions.push_back(std::move(f));
         pending.clear();
     }

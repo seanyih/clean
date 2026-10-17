@@ -3,8 +3,8 @@
 Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
-Current state: **slices 0–3** — `int` functions with locals, `if`, `switch`
-and recursion.
+Current state: **slices 0–4** — `int` and `unsigned` functions with locals,
+`if`, `switch` and recursion.
 
 ## What runs today
 
@@ -17,6 +17,7 @@ A C file goes in, a Lean file comes out, Lean type-checks it.
 | `#include …`, `#pragma …` (any `#` line) | dropped                                    |
 | prototype `int f(int a);`                | dropped (main-spec §7.1)                   |
 | `int f(int a, int b) { … }`              | `def f (a b : Int) : Int := …`             |
+| `unsigned f(unsigned a) { … }`          | `def f (a : Nat) : Nat := …`               |
 | `int f(void)` / `int f()`                | `def f : Int := …`                         |
 | `[[lean::partial]] int f(…) { … }`       | `partial def f …`                          |
 | functions in any order                   | sorted, callees first (see below)          |
@@ -29,9 +30,9 @@ from the main spec's D7 table):
 
 | C                                    | Lean                                          |
 | ------------------------------------ | --------------------------------------------- |
-| `int x = e;`                         | `let x : Int := e` (`let mut` if reassigned)  |
+| `T x = e;` (`int` / `unsigned`)      | `let x : Int / Nat := e` (`let mut` if reassigned) |
 | `x = e;`  `x += e;`  `x++;`          | `x := e`  `x := x + e`  `x := x + 1`          |
-| assigning a parameter                | `let mut a : Int := a` at the top             |
+| assigning a parameter                | `let mut a : Int / Nat := a` at the top       |
 | `if (c) … else if (d) … else …`      | `if c then … else if d then … else …`         |
 | `switch (e) { case 0: case 1: … }`   | `match e with \| 0 \| 1 => …` (see below)     |
 | `return e;`                          | `return e`                                    |
@@ -39,6 +40,14 @@ from the main spec's D7 table):
 
 **Expressions.** `42`, `0xFF`, `0b1010` keep their spelling; `+ - * / %` with
 C precedence and `( )`; `-x` → `(-x)`; `f(a, b)` → `f a b`.
+
+**Types.** `int` → `Int` and `unsigned` (also spelled `unsigned int`) → `Nat`
+(main-spec §4.1), everywhere a type can appear: return type, parameters,
+locals. Expressions are **not** type-checked: mixing `int` and `unsigned` in
+one expression is translated as written and left to Lean's coercions (D4,
+Lean semantics; the explicit conversions of §5.3 need expression typing and
+are not built yet). `unsigned short` and the other long spellings are refused
+until their slice.
 
 **Tests.** `< <= > >= == != && || !` are allowed where a test is expected
 (an `if` condition, or inside another test) and become Lean propositions:
@@ -57,11 +66,15 @@ Functions that call each other are grouped in one `mutual … end` block. Whethe
 Lean can prove termination is **Lean's call**, not ours: on failure the user
 adds `[[lean::partial]]` (all or none inside one `mutual` group). Recursive
 functions without the attribute carry a `-- note:` pointing at that fix.
+On `Nat` Lean proves ordinary countdown recursion (`n - 1`, `n / 10`, self and
+mutual) without any attribute — the `nat_*` cases rely on that; on `Int` it
+cannot (see `cases-lean-rejects`).
 
 Not translated yet (each is a hard error with location + why + fix):
 loops (`for`, `while`, `do`, `continue`), `break` outside a switch case's end,
-`?:`, uninitialised locals (`int x;`), types beyond `int` (`unsigned` → `Nat`,
-`bool`, `bv(N)` …), `main` special-casing, I/O and `printf`, arrays, structs,
+`?:`, uninitialised locals (`int x;`), types beyond `int` and `unsigned`
+(`bool`, `char`, `bv(N)`, the fixed-width `intN_t`/`uintN_t`, `unsigned short`
+and friends …), `main` special-casing, I/O and `printf`, arrays, structs,
 enums, `extern`, other attributes, preprocessor expansion (`#define` names
 are recorded; **using** one is an error, not a silent wrong name), Sparkle,
 theorems.
@@ -125,7 +138,7 @@ The suite (`test/run_e2e.sh`, `make test`):
    by `lean` (code whose legality only Lean can judge: unproven termination).
 
 Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run: Lean 4.15.0, 23/23 passing.
+`lean` is missing). Last full run: Lean 4.35.0, 27/27 passing.
 
 ## Main-spec decisions honored here
 
@@ -161,11 +174,15 @@ Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
   Octal and suffixes (`10u`) are not translated.
 - **Recursion is judged by Lean:** clean does not try to prove termination,
   and E201 (recursion rejected in `synth`) does not exist yet.
+- **Expressions are not type-checked.** `int` and `unsigned` may be mixed in
+  one expression; the output is translated as written and relies on Lean's
+  `Nat → Int` coercions (D4). A negative literal reaching an `unsigned`
+  (`unsigned x = -1;`) becomes a Lean type error, not a `clean` diagnostic.
 
 ## Next slices (suggested, one e2e case each)
 
-1. `unsigned` → `Nat` and `bool` → `Bool` (the §4.1 type table starts growing);
-   with `Nat`, simple recursion may pass without `partial`.
+1. `bool` → `Bool` (slice 4 did `unsigned` → `Nat`, the first §4.1 row after
+   `int`; with `Nat`, simple recursion passes without `partial`).
 2. Range-`for` (§6.1) and `while`; `break`/`continue` inside them.
 3. `printf` → `IO` (§8), which also brings the `main : IO UInt32` rule.
 4. `bv(N)` and the §5.4 helpers — the hardware-flavoured core.

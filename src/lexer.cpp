@@ -29,8 +29,8 @@ std::string trimBlank(const std::string& s) {
 }
 
 const char* kSliceWhy =
-    "clean translates `int` functions made of locals, assignments, `if`, `switch` and "
-    "`return` (see spec/impl-spec.md).";
+    "clean translates `int` and `unsigned` functions made of locals, assignments, `if`, "
+    "`switch` and `return` (see spec/impl-spec.md).";
 
 struct Lexer {
     const std::string& src;
