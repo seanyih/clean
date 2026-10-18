@@ -59,6 +59,7 @@ struct Case {
     std::vector<Expr> labels;  // IntLit, or UnaryNeg of an IntLit
     bool isDefault = false;    // `default:` is one of the labels
     std::vector<Stmt> body;    // without its closing `break;`
+    std::vector<Comment> bodyTrailing;  // comments at the group's end: above the stripped `break;`, or before the next label / the switch's `}`
     bool endsInBreak = false;  // the group closed with `break;`
     Loc loc;
 };
@@ -82,7 +83,9 @@ struct Stmt {
     std::vector<Stmt> elseBody;
     std::vector<Case> cases;
     bool mut = false;                 // Decl: assigned again later → `let mut` (set by check.cpp)
-    std::vector<Comment> comments;    // comments directly above the statement
+    std::vector<Comment> comments;    // comments the parser attached to this statement
+    std::vector<Comment> bodyTrailing; // If: before the then-branch's `}`; Block: before its `}`
+    std::vector<Comment> elseTrailing; // If: before the else-branch's `}`
     Loc loc;
 };
 
@@ -106,6 +109,7 @@ struct Function {
     std::vector<std::pair<Type, std::string>> params;  // (type, name), in order
     std::vector<Stmt> body;
     std::vector<Comment> comments;      // comments that sat directly above the definition
+    std::vector<Comment> bodyTrailing;  // comments before the body's closing `}`
     int defLine = 0;                    // line of the leading `int` (D9: `-- c: file:LINE`)
     bool isPartial = false;             // `[[lean::partial]]` → `partial def`
     std::vector<std::string> mutParams; // parameters the body assigns (check.cpp) → `let mut a := a`
@@ -117,4 +121,5 @@ struct Function {
 struct TranslationUnit {
     std::string fileName;               // base name, e.g. "arith.c", used in comments
     std::vector<Function> functions;    // parser: source order; after sortDefinitions(): callees first
+    std::vector<Comment> trailingComments;  // comments after the last definition
 };

@@ -4,6 +4,12 @@
 // refuses what it cannot build; whether names exist, arities match and every
 // path returns is check.cpp's job. Two small desugarings happen here because
 // they are purely syntactic: `x += e` → `x = x + e`, and `x++;` → `x = x + 1`.
+//
+// Comments are not grammar: before parsing, `parse` lifts them out of the
+// token stream, each remembering the position it sat at, so a comment can
+// never be a syntax error. They are handed back out by position (see the
+// attachment rule in parser.h / spec/impl-spec.md) and travel with the tree
+// to the emitter.
 
 #include "parser.h"
 
@@ -50,7 +56,7 @@ std::string describe(const Token& t) {
     case Token::Kind::IntLit:
     case Token::Kind::FloatLit:
     case Token::Kind::CharLit: return "literal `" + t.text + "`";
-    case Token::Kind::Comment: return "a comment";
+    case Token::Kind::Comment: return "a comment";  // unreachable: comments are lifted out before parsing
     case Token::Kind::Punct:   return "`" + t.text + "`";
     case Token::Kind::Other:   return "`" + t.text + "`";
     }
@@ -80,11 +86,15 @@ Expr::Kind binaryKind(const std::string& op) {
 }
 
 struct Parser {
+    // `toks` carries no Comment tokens (they were lifted out); `comments`
+    // holds each lifted one with the index of the token it sat before.
     const std::vector<Token>& toks;
+    std::vector<std::pair<size_t, Comment>> comments;  // (position, comment), in order
     const std::set<std::string>& macros;
     const std::map<std::string, std::string>& macroValues;  // `#define N 8` (bv widths only)
     const std::string& file;
     size_t i = 0;
+    size_t nextComment = 0;  // first comment not handed out yet
 
     const Token& peek() const { return toks[i]; }
     const Token& peek2() const { return toks[i + 1]; }  // safe unless peek() is End
@@ -95,16 +105,19 @@ struct Parser {
     bool isIdent(const std::string& s) const {
         return peek().kind == Token::Kind::Ident && peek().text == s;
     }
-    void skipComments() {
-        while (peek().kind == Token::Kind::Comment) ++i;
-    }
-    std::vector<Comment> takeComments() {
-        std::vector<Comment> cs;
-        while (peek().kind == Token::Kind::Comment) {
-            cs.push_back({peek().text, peek().block});
-            ++i;
+
+    // All still-unattached comments that sat before token `pos` (with
+    // `through`, also the ones directly before it — i.e. everything up to and
+    // including what the parser is looking at right now). Callers hand the
+    // result to the nearest statement / definition / block end.
+    std::vector<Comment> takeComments(size_t pos, bool through) {
+        std::vector<Comment> out;
+        while (nextComment < comments.size() &&
+               (through ? comments[nextComment].first <= pos
+                        : comments[nextComment].first < pos)) {
+            out.push_back(std::move(comments[nextComment++].second));
         }
-        return cs;
+        return out;
     }
 
     [[noreturn]] void failHere(const std::string& what, const std::string& why,
@@ -424,9 +437,11 @@ struct Parser {
                t == "++" || t == "--";
     }
 
-    // The body of `if` / `else`: a braced block or one statement.
-    std::vector<Stmt> parseBody() {
-        if (isPunct("{")) return parseBlock();
+    // The body of `if` / `else`: a braced block or one statement. `trailing`
+    // receives the comments that sat just before the closing `}` (empty for
+    // the one-statement form — there is no `}` there).
+    std::vector<Stmt> parseBody(std::vector<Comment>& trailing) {
+        if (isPunct("{")) return parseBlock(trailing);
         if (isPunct(";")) {  // `if (c) ;`
             ++i;
             return {};
@@ -440,10 +455,11 @@ struct Parser {
         return body;
     }
 
-    std::vector<Stmt> parseBlock() {
+    std::vector<Stmt> parseBlock(std::vector<Comment>& trailing) {
         expectPunct("{", "to open a block");
         std::vector<Stmt> body = parseStmtList(false);
         expectPunct("}", "to close the block");
+        trailing = takeComments(i, false);  // the comments that ended this block
         return body;
     }
 
@@ -453,14 +469,15 @@ struct Parser {
         s.loc = peek().loc;
         ++i;  // `if`
         s.expr = parseParenExpr("if");
-        s.body = parseBody();
-        size_t save = i;  // an `else` may follow after comments
-        skipComments();
+        for (Comment& c : takeComments(i, true)) s.comments.push_back(std::move(c));
+        s.body = parseBody(s.bodyTrailing);
+        // Comments between the body and a following `else` are attached by
+        // the `else` body's first statement (they precede its first token),
+        // so there is no lookahead dance here; without an `else` they simply
+        // belong to whatever statement comes next.
         if (isIdent("else")) {
             ++i;
-            s.elseBody = parseBody();
-        } else {
-            i = save;  // those comments belong to whatever comes next
+            s.elseBody = parseBody(s.elseTrailing);
         }
         return s;
     }
@@ -483,9 +500,9 @@ struct Parser {
         s.loc = peek().loc;
         ++i;  // `switch`
         s.expr = parseParenExpr("switch");
+        for (Comment& c : takeComments(i, true)) s.comments.push_back(std::move(c));
         expectPunct("{", "to open the switch body");
         while (true) {
-            skipComments();
             if (isPunct("}")) break;
             if (!isIdent("case") && !isIdent("default"))
                 failHere("expected `case` or `default`, found " + describe(peek()),
@@ -502,11 +519,8 @@ struct Parser {
                     c.isDefault = true;
                 }
                 expectPunct(":", "after the label");
-                size_t save = i;
-                skipComments();
                 if (isIdent("case") || isIdent("default")) continue;
-                i = save;  // those comments belong to the first statement
-                break;
+                break;  // comments before the body are picked up by its first statement
             }
             c.body = parseStmtList(true);
             while (true) {  // `case 1: { … break; }` and `case 1: { … } break;` are common styles
@@ -516,10 +530,16 @@ struct Parser {
                     if (!c.body.empty())
                         c.body[0].comments.insert(c.body[0].comments.begin(),
                                                   block.comments.begin(), block.comments.end());
+                    c.bodyTrailing.insert(c.bodyTrailing.end(),
+                                          block.bodyTrailing.begin(), block.bodyTrailing.end());
                 } else if (!c.endsInBreak && !c.body.empty() &&
                            c.body.back().kind == Stmt::Kind::Break) {
+                    Stmt br = std::move(c.body.back());
                     c.body.pop_back();
                     c.endsInBreak = true;
+                    // a comment above the stripped `break;` stays at the end of the group
+                    c.bodyTrailing.insert(c.bodyTrailing.end(),
+                                          br.comments.begin(), br.comments.end());
                 } else {
                     break;
                 }
@@ -527,6 +547,9 @@ struct Parser {
             s.cases.push_back(std::move(c));
         }
         expectPunct("}", "to close the switch body");
+        // a comment at the very end of the switch body stays with the last group
+        if (!s.cases.empty())
+            for (Comment& c : takeComments(i, false)) s.cases.back().bodyTrailing.push_back(std::move(c));
         return s;
     }
 
@@ -535,7 +558,7 @@ struct Parser {
         s.loc = peek().loc;
         if (isPunct("{")) {
             s.kind = Stmt::Kind::Block;
-            s.body = parseBlock();
+            s.body = parseBlock(s.bodyTrailing);
             return s;
         }
         if (peek().kind != Token::Kind::Ident)
@@ -589,17 +612,23 @@ struct Parser {
     }
 
     // Statements up to the closing `}` (or, in a switch, the next label).
+    // The break checks come first so that a comment before a `}` or a label is
+    // left for whoever owns that position (the block, the next group) — only
+    // comments that really precede a statement are taken here.
     std::vector<Stmt> parseStmtList(bool inSwitch) {
         std::vector<Stmt> list;
         while (true) {
-            std::vector<Comment> cs = takeComments();
             if (atEnd() || isPunct("}")) break;
             if (inSwitch && (isIdent("case") || isIdent("default"))) break;
+            std::vector<Comment> cs = takeComments(i, true);
             if (isPunct(";")) {  // empty statement
                 ++i;
                 continue;
             }
             Stmt s = parseStmt();
+            std::vector<Comment> inner = takeComments(i, false);  // comments inside the statement
+            for (Comment& c : s.comments) cs.push_back(std::move(c));
+            for (Comment& c : inner) cs.push_back(std::move(c));
             s.comments = std::move(cs);
             list.push_back(std::move(s));
         }
@@ -673,9 +702,11 @@ struct Parser {
         f.defLine = defLine;
         f.params = std::move(params);
         f.comments = std::move(comments);
+        for (Comment& c : takeComments(i, true)) f.comments.push_back(std::move(c));
         expectPunct("{", "to open the body of `" + f.name + "`");
         f.body = parseStmtList(false);
         expectPunct("}", "to close the body of `" + f.name + "`");
+        f.bodyTrailing = takeComments(i, false);  // the comments that ended the body
         rejectStrayBreak(f.body);
         return f;
     }
@@ -687,14 +718,31 @@ TranslationUnit parse(const std::vector<Token>& tokens,
                       const std::set<std::string>& definedNames,
                       const std::map<std::string, std::string>& definedValues,
                       const std::string& fileName) {
-    Parser p{tokens, definedNames, definedValues, fileName, 0};
+    // Lift the comments out of the token stream: the grammar below never sees
+    // one, so a comment can sit anywhere C allows without becoming a syntax
+    // error. Each remembers the index of the token it sat before, so it can be
+    // handed back to whatever that position belongs to (statement, definition,
+    // block end — the rule is documented in parser.h).
+    std::vector<Token> toks;
+    std::vector<std::pair<size_t, Comment>> comments;
+    for (const Token& t : tokens) {
+        if (t.kind == Token::Kind::Comment)
+            comments.push_back({toks.size(), Comment{t.text, t.block}});
+        else
+            toks.push_back(t);
+    }
+
+    Parser p{toks, comments, definedNames, definedValues, fileName, 0};
     TranslationUnit unit;
     unit.fileName = fileName;
 
     std::vector<Comment> pending;  // comments waiting for the next definition
     while (true) {
-        for (Comment& c : p.takeComments()) pending.push_back(std::move(c));
-        if (p.atEnd()) break;
+        for (Comment& c : p.takeComments(p.i, true)) pending.push_back(std::move(c));
+        if (p.atEnd()) {  // comments after the last definition end the file
+            unit.trailingComments = std::move(pending);
+            break;
+        }
         if (p.isPunct(";")) {  // stray semicolon at file scope (C23 allows it)
             ++p.i;
             continue;
@@ -705,7 +753,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         while (p.isPunct("[") && p.peek2().kind == Token::Kind::Punct && p.peek2().text == "[") {
             isPartial = p.parseAttribute() || isPartial;
             hasAttr = true;
-            for (Comment& c : p.takeComments()) pending.push_back(std::move(c));
+            for (Comment& c : p.takeComments(p.i, true)) pending.push_back(std::move(c));
         }
         if (p.peek().kind != Token::Kind::Ident)
             p.failHere("expected a declaration, found " + describe(p.peek()), kSliceWhy,

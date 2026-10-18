@@ -24,8 +24,28 @@ A C file goes in, a Lean file comes out, Lean type-checks it.
 | `int f(void)` / `int f()`                | `def f : Int := …`                         |
 | `[[lean::partial]] int f(…) { … }`       | `partial def f …`                          |
 | functions in any order                   | sorted, callees first (see below)          |
-| `//` comments, anywhere                  | `--` lines, kept above what they precede   |
-| `/* */` comments                         | `/- -/` (multi-line kept)                  |
+| `//` comments, anywhere C allows         | `--` lines (see **Comments** below)        |
+| `/* */` comments, anywhere C allows      | `/- -/`, multi-line kept (see **Comments**) |
+
+**Comments.** `//` → `--`, `/* */` → `/- -/` (multi-line kept; a block
+comment containing `/-` or `-/` falls back to `--` lines, because Lean's
+block comments nest). A comment never causes an error: the parser lifts the
+comments out of the token stream before parsing, then re-attaches each one
+by where it sat —
+
+* above the statement (or definition) it introduces, or sits inside;
+* a comment in a *header region* (inside the condition of an `if`/`switch`,
+  in a signature) attaches to the whole `if` / `switch` / definition;
+* a comment just before a closing `}` stays inside that block: end of a
+  body, branch or case group (a comment above a stripped `break;` too);
+* anything else lands on whatever follows it — the next case group,
+  statement or definition; comments after the last definition end the file.
+
+Nothing is dropped except comments around a stray `;`. The odd
+in-signature spots (inside a parameter list, between a type and a name,
+between `return` and its value …) are **deferred**: they parse fine, but the
+comment lands somewhere plausible rather than in place — do not rely on the
+spot. An unterminated `/*` is still an error (E000).
 
 **Bodies.** A body that is one `return e;` becomes `def f … := e`. Any other
 body becomes `Id.run do` (see "Known simplifications" for how this differs
@@ -130,6 +150,8 @@ convert and print as tests. The layers ask it; none of them names a type.
       │
       ▼
     parser.cpp   tokens → AST        syntax only; desugars `+=` and `x++;`
+      │                              lifts comments out and re-attaches
+      │                              them by position (they never parse)
       │
       ▼
     check.cpp    AST   → AST         names, arity, scopes, expression types
@@ -176,11 +198,10 @@ The suite (`test/run_e2e.sh`, `make test`):
    by `lean` (code whose legality only Lean can judge: unproven termination).
 
 Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run **without Lean** (golden diffs and refusals
-only): 42/42 passing. The `.checks.lean` files of `int_family`, `fixed_width`,
-`bool`, `bitvec`, `float` and `char` are written but **not yet run against
-Lean**: run `make test` where `lean` is installed, and see the "unverified
-names" list in how-to-extend.md if one fails.
+`lean` is missing). Last full run **with Lean 4.35.0** (2026-10-18, comment
+slice): 45/45 passing, plus `run_e2e_hard.sh` green — the earlier "written
+but not yet run" checks (`int_family`, `fixed_width`, `bool`, `bitvec`,
+`float`, `char`) all type-checked.
 
 ## Main-spec decisions honored here
 
@@ -209,7 +230,9 @@ names" list in how-to-extend.md if one fails.
 - **`main` is not special yet** (§7.1 says `IO UInt32`); today it is an
   ordinary `Int` function.
 - **No macro expansion**: `#define`d names are rejected when used.
-- **Comments** at the end of a block (nothing after them) are dropped.
+- **Comments:** every position C allows is kept (see **Comments** above);
+  only comments around a stray `;` are dropped with it. In-signature spots
+  are deferred — the text is preserved, but its exact spot is not promised.
   Block comments containing `/-` or `-/` fall back to `--` lines (Lean block
   comments nest).
 - **Literals**: hex is passed through verbatim; `0B…` is written `0b…`.

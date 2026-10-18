@@ -7,6 +7,7 @@ def abs_val (x : Int) : Int := Id.run do
   let mut r : Int := x
   if x < 0 then
     r := (-x)
+    -- flip the sign
   -- the answer
   return r
 

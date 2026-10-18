@@ -13,7 +13,11 @@
 //     `||` → `∨`, `!` → `¬`, and a bare number `x` in a test means `x ≠ 0`;
 //   * a bare `{ … }` block is flattened into its parent (Lean's nested `do` is not a scope);
 //   * recursive functions are printed as they are; mutually recursive ones
-//     share a `mutual … end` block (set up by toposort.cpp).
+//     share a `mutual … end` block (set up by toposort.cpp);
+//   * comments travel with the tree and are printed at the nearest legal
+//     spot: `//` → `--`, `/* */` → `/- -/`, above the statement they belong
+//     to; the ones that closed a block or a file land there (see parser.h
+//     for the attachment rule);
 
 #include "emitter.h"
 
@@ -242,7 +246,8 @@ void emitComments(const std::vector<Comment>& comments, const std::string& ind, 
 
 // ---- statements -----------------------------------------------------------
 
-void emitStmts(const std::vector<Stmt>& list, int level, std::string& out);
+void emitStmts(const std::vector<Stmt>& list, int level, std::string& out,
+               const std::vector<Comment>* trailing = nullptr);
 void emitList(const std::vector<Stmt>& list, int level, std::string& out);
 
 void emitIf(const Stmt& s, int level, std::string& out) {
@@ -250,7 +255,7 @@ void emitIf(const Stmt& s, int level, std::string& out) {
     out += pad(level) + "if ";
     emitCond(cur->expr, out);
     out += " then\n";
-    emitStmts(cur->body, level + 1, out);
+    emitStmts(cur->body, level + 1, out, &cur->bodyTrailing);
     while (!cur->elseBody.empty()) {
         const std::vector<Stmt>& e = cur->elseBody;
         if (e.size() == 1 && e[0].kind == Stmt::Kind::If && e[0].comments.empty()) {
@@ -258,10 +263,10 @@ void emitIf(const Stmt& s, int level, std::string& out) {
             out += pad(level) + "else if ";
             emitCond(cur->expr, out);
             out += " then\n";
-            emitStmts(cur->body, level + 1, out);
+            emitStmts(cur->body, level + 1, out, &cur->bodyTrailing);
         } else {
             out += pad(level) + "else\n";
-            emitStmts(e, level + 1, out);
+            emitStmts(e, level + 1, out, &cur->elseTrailing);
             break;
         }
     }
@@ -274,7 +279,7 @@ void emitSwitch(const Stmt& s, int level, std::string& out) {
     const Case* dflt = nullptr;
     auto arm = [&](const Case& c, const std::string& pattern) {
         out += pad(level) + "| " + pattern + " =>\n";
-        emitStmts(c.body, level + 1, out);
+        emitStmts(c.body, level + 1, out, &c.bodyTrailing);
     };
     for (const Case& c : s.cases) {
         if (c.isDefault) {  // `default` wins the whole group; it goes last (labels are unique)
@@ -325,6 +330,7 @@ void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
             // Lean's nested `do` is not a scope (its `let`s leak), so a bare C block is
             // flattened; check.cpp refused the blocks where that would change meaning.
             emitList(s.body, level, out);
+            emitComments(s.bodyTrailing, pad(level), out);
             break;
         case Stmt::Kind::Break:
             break;  // stripped by the parser
@@ -332,8 +338,10 @@ void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
     }
 }
 
-void emitStmts(const std::vector<Stmt>& list, int level, std::string& out) {
+void emitStmts(const std::vector<Stmt>& list, int level, std::string& out,
+               const std::vector<Comment>* trailing) {
     emitList(list, level, out);
+    if (trailing) emitComments(*trailing, pad(level), out);
     // A Lean `do` sequence cannot end in `let`, and cannot be empty.
     if (list.empty() || list.back().kind == Stmt::Kind::Decl) out += pad(level) + "pure ()\n";
 }
@@ -375,6 +383,7 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
     if (oneReturn) {
         emitExpr(f.body[0].expr, out);
         out += "\n";
+        emitComments(f.bodyTrailing, "", out);  // no `do` block to hold them
         return;
     }
     out += "Id.run do\n";
@@ -384,7 +393,7 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
             if (param.second == p) ty = param.first;
         out += pad(1) + "let mut " + p + " : " + leanName(ty) + " := " + p + "\n";
     }
-    emitStmts(f.body, 1, out);
+    emitStmts(f.body, 1, out, &f.bodyTrailing);
 }
 
 }  // namespace
@@ -411,6 +420,10 @@ std::string emit(const TranslationUnit& unit) {
             emitFunction(unit.functions[i], unit.fileName, out);
         }
         out += "end\n";
+    }
+    if (!unit.trailingComments.empty()) {
+        out += "\n";
+        emitComments(unit.trailingComments, "", out);
     }
     return out;
 }
