@@ -2,7 +2,8 @@
 
 The agreement-level decisions of `clean`, extracted from main-spec §2.
 D1–D17 are quoted from there; every open question that gets decided
-([open-decisions.md](open-decisions.md)) is appended after D17 as D18+ (D18, D19 so far).
+([open-decisions.md](open-decisions.md)) is appended after D17 as D18+ (D18,
+D19 and D20 so far).
 
 - Section references (§…) point into main-spec.md.
 - D-numbers are stable — main-spec text refers to them (D4, D14, …). Do not renumber.
@@ -29,6 +30,7 @@ D1–D17 are quoted from there; every open question that gets decided
 | D17 | **`HW` bodies always obey the `synth` subset**, whatever the file's profile (§17.4).                                                                                                                             | A hardware body that is not synthesizable is a bug, not a model.                                                                      |
 | D18 | **`/` and `%` on `Int` keep Lean's semantics; the difference from C is an opt-in lint.** `-7 / 2 = -4` and `-7 % 2 = 1` (Euclidean), not C's `-3` and `-1`. No `Int.tdiv`/`Int.tmod` is emitted. `--lint=c-semantics` reports it as **W014** (new code, §13.1), and a possibly-zero divisor as W005. | Consistent with D4 (C syntax, Lean semantics) and with §5.1 as written. Decided by the human (was OD8, option (a)). Implemented in `src/lint.cpp`. |
 | D19 | **A mix of types is converted, not refused.** Operands of different types are converted by the explicit Lean conversion of §5.3, to the type of higher rank (`Nat < Int < intN_t/uintN_t < bv(N) < Float32 < Float`; two fixed widths: the wider, then the unsigned one; a literal adapts; `char` is its code in arithmetic). Assignments, arguments and `return` convert to the declared type the same way. `bv(N)` with `bv(M)` (E301), and `bool`/`String`/arrays with anything, stay errors: §5.3 has no row. | The tool is syntax sugar (D4), so it should accept what C accepts and show the conversion Lean needs (D10). The rank rule is the part the main spec left open; written into §5.3. Decided by the human (was OD9, option (a)). Implemented in `types.cpp` (`unify`, `flowKind`, `convert`) and `check.cpp`. |
+| D20 | **A `void` function that writes an array parameter returns the modified array.** C's `void fill(int a[], int n) { a[0] = 1; }` changes the caller's array; Lean's arrays are values, so the emitted `fill` has the parameter's array type instead of `Unit`, `return;` and every falling-off path return `a`, and each call statement re-assigns what it passed (`fill(x, n);` → `x := fill x n`). Writer-ness flows backwards along call edges: passing your own array parameter to a writer writes it. Refused (would need a tuple return, not built): a non-`void` writer, two or more written array parameters, and a writer call whose written argument is not a whole variable. | Option (c) of the choice; the §4.6 "return value" idea. It keeps D5 (the write is never silently dropped) and needs no new Lean concepts — the shapes were verified on Lean 4.35.0. Decided by the human (was OD11, option (c)). Implemented in `check.cpp` (`findWriters` + the call-site rule) and `emitter.cpp`; the emitted shapes are in `test/cases/array_writer.c`. |
 
 ## Formerly open questions, already folded in
 

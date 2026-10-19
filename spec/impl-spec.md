@@ -3,12 +3,13 @@
 Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
-Current state: **slices 0–6** — functions over every type of main-spec §4.1
+Current state: **slices 0–7** — functions over every type of main-spec §4.1
 and §4.3–4.4 except structs/enums/typedefs: integers, `intN_t`/`uintN_t`,
 `bool`, `char`, `bv(N)`, `float`/`double`, `void`, strings and arrays, with
 locals, `if`, `switch` (on `int`/`unsigned`), casts, automatic conversions
-between mixed types (D19), recursion, and the opt-in `--lint=c-semantics`
-(D18). Adding a type is one table row plus a few `case`s: see
+between mixed types (D19), recursion, the opt-in `--lint=c-semantics`
+(D18), and `void` array writers (OD11 c → D20). Adding a type is one table
+row plus a few `case`s: see
 [how-to-extend.md](how-to-extend.md).
 
 ## What runs today
@@ -60,8 +61,8 @@ from the main spec's D7 table):
 | `x = e;`  `x += e;`  `x++;`          | `x := e`  `x := x + e`  `x := x + 1`          |
 | `T a[N] = {…};`  `T a[N];`           | `let a : Array T := #[…]` / `Array.replicate N …` |
 | `a[i] = e;`  `a[i][j] += e;`         | `a := a.set! i e`  `a := a.set! i (a[i]!.set! j (a[i]![j]! + e))` |
-| `f(x);` (`f` is `void`)              | `let _ := f x`                                |
-| `return;` (in a `void` function)     | `return ()`                                   |
+| `f(x);` (`f` is `void`)              | `let _ := f x` (a writer: `x := f x …`, D20)   |
+| `return;` (in a `void` function)     | `return ()` (in a writer: `return a`)          |
 | assigning a parameter                | `let mut a : T' := a` at the top              |
 | `if (c) … else if (d) … else …`      | `if c then … else if d then … else …`         |
 | `switch (e) { case 0: case 1: … }`   | `match e with \| 0 \| 1 => …` (see below)     |
@@ -134,7 +135,9 @@ off the end is fine, and the body of a non-trivial one ends in `pure ()`.
 Functions are pure in Lean, so it can do nothing observable until `printf`
 (§8) exists; it still translates, and `f(x);` is accepted for a `void` `f`
 (as `let _ := f x`). The result of a `void` call used as a value, a `void`
-variable or parameter, and a discarded non-`void` result are refused.
+variable or parameter, and a discarded non-`void` result are refused. The
+one `void` function that does something observable is the **array writer**
+(OD11 c → D20): it returns the modified array instead of `Unit`.
 
 **Strings** (§4.3). `String` values: literals, `char *` / `char s[]`
 parameters, locals initialised from a literal (`char s[] = "abc";`), indexing
@@ -152,11 +155,27 @@ types are any scalar or string; `bool a[N]` also prints hint **H001**
 (silence with `#pragma lean allow_bool_array`). Parameters: `T a[]`, `T a[N]`,
 `T m[][N]`, and `T *a` **only** when a length parameter follows it (§4.6,
 **E101** otherwise); `T *p` anywhere else is **E101**. Writes (`a[i] = v`,
-`+=`, `++`) work on **local** arrays; a write to an array **parameter** is
-refused, because C would change the caller's array and Lean would lose the
-write (open decision OD11). Refused: `a = b`, `int a[n]` (variable size),
-`a[0]`, too many initialisers, comparing arrays, brace elision
+`+=`, `++`) work on **local** arrays and on **one array parameter of a `void`
+function** — see "Array writers" below. Refused: `a = b`, `int a[n]` (variable
+size), `a[0]`, too many initialisers, comparing arrays, brace elision
 (`int m[2][2] = {1, 2, 3, 4}`).
+
+**Array writers** (OD11 c → **D20**). C's `void fill(int a[], int n)`
+changes the caller's array; Lean's arrays are values. A `void` function that
+writes exactly one array parameter — directly or by passing it to another
+writer — becomes a function that **returns the modified array**: the emitted
+type is the parameter's instead of `Unit`, `return;` and every path that
+falls off the end return `a` (an `if`/`switch` in last position gets a
+`return a` on every path, including a synthesized missing `else`), and every
+call statement re-assigns what was passed: `fill(x, n);` is `x := fill x n`
+(a local is marked `let mut` for it). Passing your own array parameter to a
+writer writes it too, so writer-ness flows backwards along call edges
+(`findWriters` in check.cpp runs before the per-function checks). Refused:
+a **non-`void`** function that writes an array parameter, **two or more**
+written array parameters (both need a tuple return, not built), and a writer
+call whose written argument is not a whole variable (`fill(m[1], n)` — copy
+the row out and back). See `test/cases/array_writer.c` for every emitted
+shape, verified on Lean 4.35.0.
 
 **Switch.** The scrutinee is `int` or `unsigned` (match patterns on the other
 types are unverified). Labels are integer literals (`3`, `-1`, `0x10`). Labels that
@@ -262,13 +281,10 @@ The suite (`test/run_e2e.sh`, `make test`):
    by default.
 
 Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run here (2026-10-19, after merging the comment
-slice) **without Lean**: all passing (golden diffs, refusals, lint reports).
-With Lean 4.35.0 the owner ran the `.checks.lean` files of `int_family`,
-`fixed_width`, `bool`, `bitvec`, `float`, `char` and `comments`, and
-`run_e2e_hard.sh`: all passed. The checks of **`void`, `string`, `array` and
-`mixing` have not been run on Lean yet**; if one fails, look first at the names
-listed under "Unverified Lean names" below.
+`lean` is missing). Last full run here (2026-10-19, after the OD11 slice)
+**with Lean 4.35.0**: all passing — golden diffs, refusals, lint reports and
+the `.checks.lean` of every case including `array_writer` (77/77), plus
+`run_e2e_hard.sh`.
 
 ## Main-spec decisions honored here
 
@@ -281,6 +297,9 @@ listed under "Unverified Lean names" below.
 - **D9** every definition carries `-- c: file:LINE`.
 - **D10** permissive in, strict out: prototypes, `f()`, stray `;`, braces
   optional on single-statement `if` bodies; refusals come with a why and a fix.
+- **D20** array writers: a `void` function that writes exactly one array
+  parameter returns the modified array; call sites re-assign what they passed
+  (see "Array writers" above).
 - **§13.1** every message has the `code file:LINE:COL what / why / fix` shape.
 
 ## Known simplifications (deliberate, listed so they surprise no one)
@@ -312,10 +331,12 @@ listed under "Unverified Lean names" below.
   in `Int`, `char - char` in `Nat` (so `'a' - 'b'` is 0, not -1). C's usual
   arithmetic conversions are not replicated. `--lint=c-semantics` flags the
   places where the difference shows (W002, W007, W008, W009).
-- **Unverified Lean names** (new in slice 6, never run): `Array.replicate`,
-  `Array.set!`, `a[i]!` on nested arrays, `String.toList`, `#[…] ++ …`,
-  `let _ := f x` as a statement, and the `↑s.toList[i]!.toNat` shape of a
-  `char` read from a string. The names from slice 5 were verified by the owner.
+- **Lean names, verified:** the slice-6 names (`Array.replicate`, `Array.set!`,
+  `a[i]!` on nested arrays, `String.toList`, `#[…] ++ …`, `let _ := f x` as a
+  statement, the `↑s.toList[i]!.toNat` shape) and the slice-7 writer shapes
+  (`return a` at the end of a body and inside branches, a value-yielding
+  `if`/`match` with a missing-`else` `return a` arm, `x := f x …` write-back)
+  all type-checked on Lean 4.35.0 by the full suite (2026-10-19).
 - **`switch` on `uint8_t`, `bv(N)`, `char`…** is refused: literal patterns on
   those types are unverified. Use `if`/`else if`.
 - **Casts of `Int` to `uintN_t`** wrap (`UIntN.ofNat ((x % 2^N).toNat)`);
@@ -331,5 +352,5 @@ listed under "Unverified Lean names" below.
    AST, which is the next structural step. Also unlocks `switch` on enums.
 4. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
    give E301 its fix — and the `<string.h>` helpers (§12.3).
-5. The decision on OD11 (writes through array parameters) unlocks the usual
-   `void fill(int a[], int n)` style.
+5. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and
+   a tuple return for non-`void` writers / several written arrays.

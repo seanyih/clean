@@ -3,6 +3,7 @@
 #include "check.h"
 
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <set>
 
@@ -59,6 +60,159 @@ long long labelValue(const Expr& e) {
     return (long long)std::strtoull(t.c_str(), nullptr, 0);  // decimal or 0x…
 }
 
+// ---- array-parameter writers (OD11, option c) ------------------------------
+//
+// C's `void fill(int a[], int n) { a[0] = 1; }` hands the caller back a
+// modified array; Lean passes arrays by value, so the write would silently
+// vanish. The decision (design-decisions.md, D20): such a function *returns*
+// the new array — the emitted `def` has the written parameter's array type
+// instead of `Unit`, and every call site re-assigns: `fill(x, n);` →
+// `x := fill x n`.
+//
+// Which functions are writers cannot be decided one function at a time:
+// passing your own array parameter to a writer writes it too, so the answer
+// flows backwards along call edges. The scan below walks every body
+// leniently — the scope rules of `Checker` (parameters in scope 0; every
+// `if`/`else`/case/bare-block body its own scope; declarations shadow), but
+// no diagnostics, because the bodies have not been checked yet. It collects:
+//   * direct writes: an `Assign` with indices whose target is an array parameter;
+//   * call edges: a call argument that names an array parameter of the caller.
+// A fixpoint then propagates "the callee writes its parameter k" along those
+// edges. What survives — exactly one written parameter and a `void` return —
+// is a writer; anything else is refused (a tuple return is not built).
+
+// One call site: the callee, which argument position, and the caller
+// parameter passed there.
+struct WriteEdge {
+    size_t callee;  // index into the unit's functions
+    size_t argPos;
+    size_t param;   // the caller's parameter index
+    Loc loc;
+};
+
+// The lenient walk over one body. Mirrors `Checker`'s scope discipline, minus
+// every rule that reports; `Checker` runs later and judges for real.
+struct WriterScan {
+    const Function& fn;
+    const std::map<std::string, size_t>& fnIndex;  // function name → its index
+    std::map<size_t, Loc>& writes;                  // out: parameter index → first write seen
+    std::vector<WriteEdge>& edges;                  // out
+    std::vector<std::map<std::string, int>> scopes;  // name → parameter index, or -1 = a local
+
+    // -2 = not visible, -1 = a local, >= 0 = the parameter's index
+    int resolve(const std::string& name) const {
+        for (size_t k = scopes.size(); k-- > 0;) {
+            auto it = scopes[k].find(name);
+            if (it != scopes[k].end()) return it->second;
+        }
+        return -2;
+    }
+
+    void noteWrite(size_t param, Loc loc) {
+        if (fn.params[param].first.kind == Type::Kind::Array && !writes.count(param)) writes[param] = loc;
+    }
+
+    void scope(const std::vector<Stmt>& list) {
+        scopes.emplace_back();
+        scan(list);
+        scopes.pop_back();
+    }
+
+    void scan(const std::vector<Stmt>& list) {
+        for (const Stmt& s : list) {
+            switch (s.kind) {
+            case Stmt::Kind::Decl:
+                scopes.back()[s.name] = -1;
+                break;
+            case Stmt::Kind::Assign: {
+                const int p = resolve(s.name);
+                if (!s.indices.empty() && p >= 0) noteWrite((size_t)p, s.loc);
+                break;
+            }
+            case Stmt::Kind::CallStmt: {
+                auto it = fnIndex.find(s.expr.text);
+                if (it == fnIndex.end()) break;  // unknown callee: Checker refuses it later
+                for (size_t k = 0; k < s.expr.kids.size(); ++k) {
+                    const Expr& arg = s.expr.kids[k];
+                    if (arg.kind != Expr::Kind::Ident) continue;
+                    const int p = resolve(arg.text);
+                    if (p >= 0 && fn.params[(size_t)p].first.kind == Type::Kind::Array)
+                        edges.push_back(WriteEdge{it->second, k, (size_t)p, arg.loc});
+                }
+                break;
+            }
+            case Stmt::Kind::If:
+                scope(s.body);
+                scope(s.elseBody);
+                break;
+            case Stmt::Kind::Switch:
+                for (const Case& c : s.cases) scope(c.body);
+                break;
+            case Stmt::Kind::Block:
+                scope(s.body);
+                break;
+            default:
+                break;  // Return, Break: nothing to gather
+            }
+        }
+    }
+
+    void run() {
+        scopes.emplace_back();
+        for (size_t k = 0; k < fn.params.size(); ++k) scopes[0][fn.params[k].second] = (int)k;
+        scan(fn.body);
+    }
+};
+
+// The pre-pass proper: scan, propagate, then set `writerParam` on the winners
+// and refuse the shapes clean cannot express (one array out, `void` only).
+void findWriters(TranslationUnit& unit, const std::string& file) {
+    const size_t n = unit.functions.size();
+    std::map<std::string, size_t> fnIndex;
+    for (size_t k = 0; k < n; ++k) fnIndex[unit.functions[k].name] = k;
+
+    std::vector<std::map<size_t, Loc>> writes(n);
+    std::vector<std::vector<WriteEdge>> edges(n);
+    for (size_t k = 0; k < n; ++k) WriterScan{unit.functions[k], fnIndex, writes[k], edges[k], {}}.run();
+
+    bool changed = true;  // passing your parameter to a writer writes it — repeat until stable
+    while (changed) {
+        changed = false;
+        for (size_t f = 0; f < n; ++f)
+            for (const WriteEdge& e : edges[f])
+                if (writes[e.callee].count(e.argPos) && !writes[f].count(e.param)) {
+                    writes[f][e.param] = e.loc;
+                    changed = true;
+                }
+    }
+
+    for (size_t f = 0; f < n; ++f) {
+        Function& fn = unit.functions[f];
+        if (writes[f].empty()) continue;
+        auto first = writes[f].begin();
+        const std::string& pname = fn.params[first->first].second;
+        if (fn.retType.kind != Type::Kind::Unit)
+            fail(file, first->second,
+                 "`" + fn.name + "` returns `" + cName(fn.retType) + "` and also writes to its array "
+                 "parameter `" + pname + "`",
+                 "in C the caller's array changes too, so clean would have to return both the "
+                 "`" + cName(fn.retType) + "` value and the new array; a tuple return is not built "
+                 "(main-spec §4.6 keeps it 🟡).",
+                 "make the function `void` — the written array parameter then becomes its return "
+                 "value — or pass a local array instead.");
+        if (writes[f].size() > 1) {
+            auto second = std::next(first);
+            fail(file, second->second,
+                 "`" + fn.name + "` writes to more than one array parameter (`" + pname + "` and `" +
+                 fn.params[second->first].second + "`)",
+                 "clean returns one modified array per function (D5: silently dropping the second "
+                 "write would be a wrong translation, and a tuple return is not built).",
+                 "write to one array parameter per function, or make the other a local array.");
+        }
+        fn.writerParam = (int)first->first;
+    }
+}
+
 // ---- the checker ----------------------------------------------------------
 
 struct Sig {
@@ -79,6 +233,7 @@ struct Checker {
     Function& fn;
     const std::set<std::string>& pragmas;    // `#pragma lean …` words
     std::vector<DiagError>& notes;           // hints (H…) the unit carries to main
+    const std::map<std::string, int>& writers;  // name → written array parameter's index (OD11 c)
     // scopes[0] holds the parameters and the function's top-level locals.
     std::vector<std::map<std::string, Var>> scopes;
     std::vector<bool> bare;  // per scope: opened by a bare `{ }` block (flattened in Lean)
@@ -337,24 +492,23 @@ struct Checker {
         }
     }
 
-    Type markAssigned(const Stmt& s) {
+    void markAssigned(const std::string& name, Loc loc) {
         Var v;
-        if (!lookup(s.name, v)) {
-            if (sigs.count(s.name))
-                fail(file, s.loc, "assignment to the function `" + s.name + "`",
+        if (!lookup(name, v)) {
+            if (sigs.count(name))
+                fail(file, loc, "assignment to the function `" + name + "`",
                      "functions are not assignable.", "assign to a local variable.");
-            fail(file, s.loc, "assignment to `" + s.name + "`, which is not declared",
+            fail(file, loc, "assignment to `" + name + "`, which is not declared",
                  "clean rejects unknown names instead of emitting Lean that fails later (D5).",
-                 "declare it first: `int " + s.name + " = …;`.");
+                 "declare it first: `int " + name + " = …;`.");
         }
         if (v.decl) {
             v.decl->mut = true;
         } else {
             bool seen = false;
-            for (const std::string& p : fn.mutParams) seen = seen || p == s.name;
-            if (!seen) fn.mutParams.push_back(s.name);
+            for (const std::string& p : fn.mutParams) seen = seen || p == name;
+            if (!seen) fn.mutParams.push_back(name);
         }
-        return v.type;
     }
 
     void scoped(std::vector<Stmt>& list, bool isBare = false) {
@@ -486,17 +640,24 @@ struct Checker {
                         valueAs(idx, Type::of(Type::Kind::Nat));
                         t = t.elem();
                     }
-                    if (!s.indices.empty() && !target.decl)
+                    if (!s.indices.empty() && !target.decl &&
+                        (fn.writerParam < 0 || fn.params[(size_t)fn.writerParam].second != s.name))
+                        // OD11 (c): a write to an array parameter is legal exactly in a writer,
+                        // through its one written parameter. findWriters refuses every other
+                        // shape before this point, so this is belt and braces.
                         fail(file, s.loc, "`" + s.name + "` is an array parameter and is written to",
-                             "C would change the caller's array; Lean passes arrays by value, so the write "
-                             "would silently be lost (D5; see open decision OD11).",
-                             "copy it into a local array first, or compute the result and return it.");
+                             "C would change the caller's array. clean gives the modified array "
+                             "back instead: a `void` function that writes exactly one array "
+                             "parameter returns it (see design-decisions.md, D20) — this function "
+                             "is not one.",
+                             "make the function `void` and write to one array parameter, or copy "
+                             "into a local array.");
                     if (s.indices.empty() && t.kind == Type::Kind::Array)
                         fail(file, s.loc, "assignment to the whole array `" + s.name + "`",
                              "C rejects it too.", "assign the elements one by one.");
                     valueAs(s.expr, t);
                 }
-                markAssigned(s);  // refuses unknown names and functions
+                markAssigned(s.name, s.loc);  // refuses unknown names and functions
                 break;
             }
             case Stmt::Kind::CallStmt: {
@@ -506,6 +667,19 @@ struct Checker {
                          "functions are pure in Lean; a discarded value does nothing "
                          "(effects arrive with `printf` and IO).",
                          "use the value: `T r = " + s.expr.text + "(…);`.");
+                auto w = writers.find(s.expr.text);
+                if (w != writers.end()) {  // the callee is a writer: the array comes back (OD11 c)
+                    Expr& arg = s.expr.kids[(size_t)w->second];
+                    if (arg.kind != Expr::Kind::Ident)
+                        fail(file, arg.loc, "`" + s.expr.text + "(…)` writes the array it is passed, "
+                             "but that argument is not a whole variable",
+                             "the modified array comes back as the return value, so it must be "
+                             "assigned back to whatever was passed — only a variable can receive it.",
+                             "pass an array variable; for a row of a 2D array, copy it out first "
+                             "and copy it back after the call.");
+                    markAssigned(arg.text, arg.loc);  // `let mut` parameter / marks the local's Decl
+                    s.writeBack = arg.text;
+                }
                 break;
             }
             case Stmt::Kind::If:
@@ -570,5 +744,10 @@ void check(TranslationUnit& unit) {
         for (const auto& p : f.params) sig.params.push_back(p.first);
         sigs[f.name] = sig;
     }
-    for (Function& f : unit.functions) Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, {}, {}}.run();
+    findWriters(unit, unit.fileName);  // OD11 (c): sets writerParam, refuses what cannot be expressed
+    std::map<std::string, int> writers;  // name → its written array parameter's index
+    for (const Function& f : unit.functions)
+        if (f.writerParam >= 0) writers[f.name] = f.writerParam;
+    for (Function& f : unit.functions)
+        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, {}, {}}.run();
 }

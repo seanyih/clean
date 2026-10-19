@@ -229,9 +229,20 @@ Pointers are the main source of untranslatable C. v0.1 accepts only these forms:
 | Array parameter / decay (`T *a, size_t n`)                                        | `Array T`                                             | ✅      |
 | `const T *p` read-only parameter                                                  | by-value `T`                                          | 🟡     |
 | Output parameter (`void f(int *out)`)                                             | return value / tuple                                  | 🟡     |
+| Write through an array parameter (`void f(T a[], …)` writing `a[i]`)              | the function **returns the modified array** (D20)     | ✅ (one array, `void` only; several outputs still 🟡) |
 | `char *`                                                                          | `String`                                              | ✅      |
 | Anything else (pointer arithmetic, `T **`, `void *`, casts between pointer types) | ⛔ (**E101**)                                          | —      |
 | Function pointers                                                                 | ⛔ (**E107**) in v0.1; 🟡 as function-typed parameters | —      |
+
+**Array-output parameters (D20).** The common C shape `void fill(T a[], …)
+{ a[i] = v; … }` is translated as a function that returns the array it
+modified: the emitted definition has `a`'s type instead of `Unit`, `return;`
+and every path that falls off the end return `a`, and each call statement
+re-assigns what was passed (`fill(x, n);` → `x := fill x n`). Passing your
+own array parameter to such a function writes it too, so the property flows
+backwards along call edges. Refused (a tuple return is not built): a
+non-`void` function that writes an array parameter, two or more written array
+parameters, and a writer call whose written argument is not a whole variable.
 
 ### 4.7 Qualifiers and storage classes
 
@@ -626,7 +637,7 @@ Normative statement: for every symbolic per-cycle input streams, `(impl inputs).
 | --------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------ |
 | **1. Getting to Know Lean**                   | `#eval` expressions                                                                   | file-scope `printf`; `LEAN_STMT("#eval …")`                        | ✅                              |
 |                                               | Types: `Nat`, `Int`, `Float`, `String`, `Bool`, `Char`, `Unit`                        | §4.1                                                               | ✅                              |
-|                                               | Products (tuples)                                                                     | struct; multi-return via out-params                                | ✅ / 🟡                         |
+|                                               | Products (tuples)                                                                     | struct; multi-return via out-params                                | ✅ (single-array out-param is D20) / 🟡                         |
 |                                               | Sum types, `Option`                                                                   | tagged unions; NULL-return idiom                                   | 🔮 / 🟡                        |
 |                                               | `def`, arguments, `let`                                                               | functions, locals                                                  | ✅                              |
 |                                               | Lambdas (`fun`), higher-order functions                                               | function pointers                                                  | 🟡                             |
@@ -707,7 +718,8 @@ Organised by the Language Reference. **Core features first; convenience features
 - **Overloading.** C11 `_Generic` selection maps to `match`-style dispatch or separate definitions in a namespace; true overloading arrives with C++ (§15).
 - **`Option`/`Except`** conventions for error-code returns.
 - **Lambdas / function pointers** as function-typed parameters.
-- **Tuples / multiple return values** via out-parameters.
+- **Tuples / multiple return values** via out-parameters (a single array
+  out-parameter already works — D20).
 - **`List`** for linked structures; **`Vector α n`** for fixed arrays.
 - **`where`-local helpers** (C has no nested functions; GNU extension only if wanted).
 
@@ -934,7 +946,7 @@ E101  buf.c:2:1   pointer indexing on `p`
 | Version   | Content                                                                                                                                                                                                                                                                             |
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **v0.1**  | Everything tagged ✅: types, expressions, `do` control flow, functions, value-level `extern`, `sparkle.h` tier S0 (`HW` externs for combinational modules), I/O, `VERIFY_FORALL`, diagnostics, FPIL ch. 1–2 coverage.                                                                |
-| **v0.2**  | 🟡 items: loop-pattern equivalence, `HW_LAT` and `VERIFY_AT`, `Vector α n`, `Option`/`Except`, tuples/out-parameters, function-typed parameters, `GENERIC`, stdin/file I/O, `--index=proof`, symbolic widths via `abbrev`, tactic overrides, struct/array at the hardware boundary. |
+| **v0.2**  | 🟡 items: loop-pattern equivalence, `HW_LAT` and `VERIFY_AT`, `Vector α n`, `Option`/`Except`, tuples/out-parameters (beyond the single-array case of D20), function-typed parameters, `GENERIC`, stdin/file I/O, `--index=proof`, symbolic widths via `abbrev`, tactic overrides, struct/array at the hardware boundary. |
 | **v0.3**  | `sparkle.h` authoring tiers S1 (combinational `HW` bodies) and S2 (`REG`/`NEXT`), Sparkle command macros (§17), sequential specs (§15.1), `--sparkle-cmds` lowering, differential-testing harness, `mvcgen`-style specifications.                                                   |
 | **v1.0**  | Stable diagnostics and output format; Verilog→Lean interop so the C-authored model and the translated RTL meet in one Lean project.                                                                                                                                                 |
 | **Later** | 🔮 C++ subset (templates → polymorphism, overloading → type classes), tagged unions, Python front-end sharing the same Lean emitter.                                                                                                                                                |

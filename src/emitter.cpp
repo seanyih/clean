@@ -14,6 +14,11 @@
 //   * a bare `{ … }` block is flattened into its parent (Lean's nested `do` is not a scope);
 //   * recursive functions are printed as they are; mutually recursive ones
 //     share a `mutual … end` block (set up by toposort.cpp);
+//   * a `void` writer (OD11 c, decision D20) returns the array parameter it
+//     wrote instead of `Unit`: `return;` and every path that falls off the
+//     end become `return a`, a value-yielding `if` gets a missing-`else`
+//     `return a` arm, and a writer call statement re-assigns the variable
+//     that was passed (`fill(x, n);` → `x := fill x n`);
 //   * comments travel with the tree and are printed at the nearest legal
 //     spot: `//` → `--`, `/* */` → `/- -/`, above the statement they belong
 //     to; the ones that closed a block or a file land there (see parser.h
@@ -256,16 +261,35 @@ void emitComments(const std::vector<Comment>& comments, const std::string& ind, 
 
 // ---- statements -----------------------------------------------------------
 
-void emitStmts(const std::vector<Stmt>& list, int level, std::string& out,
-               const std::vector<Comment>* trailing = nullptr);
-void emitList(const std::vector<Stmt>& list, int level, std::string& out);
+// `wret` names the array parameter a `void` writer function returns (OD11 c);
+// empty for ordinary functions, which take none of the writer paths. A block
+// emitted with `value` = true must end in that array: a path that falls off
+// the end gets `return wret`, and an `if`/`match` in last position (`last`,
+// after flattening bare blocks) is emitted total, so it yields the value.
 
-void emitIf(const Stmt& s, int level, std::string& out) {
+void emitStmts(const std::vector<Stmt>& list, int level, const std::string& wret, bool value,
+               std::string& out, const std::vector<Comment>* trailing = nullptr);
+void emitList(const std::vector<Stmt>& list, int level, const std::string& wret, const Stmt* last,
+              std::string& out);
+
+// The statement that really ends a `do` stream: bare `{ }` blocks are
+// flattened into their parent, so the last statement may sit inside them.
+const Stmt* lastReal(const std::vector<Stmt>& list) {
+    if (list.empty()) return nullptr;
+    const Stmt* s = &list.back();
+    while (s->kind == Stmt::Kind::Block) {
+        if (s->body.empty()) return nullptr;  // the stream ends in nothing
+        s = &s->body.back();
+    }
+    return s;
+}
+
+void emitIf(const Stmt& s, int level, const std::string& wret, bool yield, std::string& out) {
     const Stmt* cur = &s;
     out += pad(level) + "if ";
     emitCond(cur->expr, out);
     out += " then\n";
-    emitStmts(cur->body, level + 1, out, &cur->bodyTrailing);
+    emitStmts(cur->body, level + 1, wret, yield, out, &cur->bodyTrailing);
     while (!cur->elseBody.empty()) {
         const std::vector<Stmt>& e = cur->elseBody;
         if (e.size() == 1 && e[0].kind == Stmt::Kind::If && e[0].comments.empty()) {
@@ -273,23 +297,25 @@ void emitIf(const Stmt& s, int level, std::string& out) {
             out += pad(level) + "else if ";
             emitCond(cur->expr, out);
             out += " then\n";
-            emitStmts(cur->body, level + 1, out, &cur->bodyTrailing);
+            emitStmts(cur->body, level + 1, wret, yield, out, &cur->bodyTrailing);
         } else {
             out += pad(level) + "else\n";
-            emitStmts(e, level + 1, out, &cur->elseTrailing);
-            break;
+            emitStmts(e, level + 1, wret, yield, out, &cur->elseTrailing);
+            return;
         }
     }
+    if (yield)  // a value-yielding `if` must be total: a missing else returns the array as it is
+        out += pad(level) + "else\n" + pad(level + 1) + "return " + wret + "\n";
 }
 
-void emitSwitch(const Stmt& s, int level, std::string& out) {
+void emitSwitch(const Stmt& s, int level, const std::string& wret, bool yield, std::string& out) {
     out += pad(level) + "match ";
     emitExpr(s.expr, out);
     out += " with\n";
     const Case* dflt = nullptr;
     auto arm = [&](const Case& c, const std::string& pattern) {
         out += pad(level) + "| " + pattern + " =>\n";
-        emitStmts(c.body, level + 1, out, &c.bodyTrailing);
+        emitStmts(c.body, level + 1, wret, yield, out, &c.bodyTrailing);
     };
     for (const Case& c : s.cases) {
         if (c.isDefault) {  // `default` wins the whole group; it goes last (labels are unique)
@@ -305,8 +331,9 @@ void emitSwitch(const Stmt& s, int level, std::string& out) {
     }
     if (dflt) {
         arm(*dflt, "_");
-    } else {  // C: no default → nothing happens
-        out += pad(level) + "| _ =>\n" + pad(level + 1) + "pure ()\n";
+    } else {  // C: no default → nothing happens (a writer: return the array as it is)
+        out += pad(level) + "| _ =>\n" + pad(level + 1) +
+               (yield ? "return " + wret : "pure ()") + "\n";
     }
 }
 
@@ -362,7 +389,8 @@ std::string setElement(const std::string& base, const std::vector<Expr>& idx, si
 }
 
 // The statements themselves, no `do`-sequence housekeeping.
-void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
+void emitList(const std::vector<Stmt>& list, int level, const std::string& wret, const Stmt* last,
+              std::string& out) {
     for (const Stmt& s : list) {
         emitComments(s.comments, pad(level), out);
         switch (s.kind) {
@@ -383,27 +411,32 @@ void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
             }
             out += "\n";
             break;
-        case Stmt::Kind::CallStmt:  // a `void` call: pure, so it can only be run for show
-            out += pad(level) + "let _ := ";
+        case Stmt::Kind::CallStmt:
+            if (!s.writeBack.empty()) {  // a writer call: the modified array comes back (OD11 c)
+                out += pad(level) + s.writeBack + " := ";
+            } else {  // a plain `void` call: pure, so it can only be run for show
+                out += pad(level) + "let _ := ";
+            }
             emitExpr(s.expr, out);
             out += "\n";
             break;
         case Stmt::Kind::Return:
             out += pad(level) + "return ";
-            if (s.noValue) out += "()";
+            if (s.noValue) out += wret.empty() ? "()" : wret;  // a writer returns its array
             else emitExpr(s.expr, out);
             out += "\n";
             break;
         case Stmt::Kind::If:
-            emitIf(s, level, out);
+            emitIf(s, level, wret, !wret.empty() && &s == last, out);
             break;
         case Stmt::Kind::Switch:
-            emitSwitch(s, level, out);
+            emitSwitch(s, level, wret, !wret.empty() && &s == last, out);
             break;
         case Stmt::Kind::Block:
             // Lean's nested `do` is not a scope (its `let`s leak), so a bare C block is
             // flattened; check.cpp refused the blocks where that would change meaning.
-            emitList(s.body, level, out);
+            // The flattened stream keeps the same last statement.
+            emitList(s.body, level, wret, last, out);
             emitComments(s.bodyTrailing, pad(level), out);
             break;
         case Stmt::Kind::Break:
@@ -412,10 +445,19 @@ void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
     }
 }
 
-void emitStmts(const std::vector<Stmt>& list, int level, std::string& out,
-               const std::vector<Comment>* trailing) {
-    emitList(list, level, out);
+void emitStmts(const std::vector<Stmt>& list, int level, const std::string& wret, bool value,
+               std::string& out, const std::vector<Comment>* trailing) {
+    const Stmt* last = lastReal(list);
+    emitList(list, level, wret, last, out);
     if (trailing) emitComments(*trailing, pad(level), out);
+    if (value) {
+        // A writer's block: a path that falls off the end returns the array as it is.
+        // A `return` already ends it; a total `if`/`match` in last position yields it.
+        if (!(last && (last->kind == Stmt::Kind::Return || last->kind == Stmt::Kind::If ||
+                       last->kind == Stmt::Kind::Switch)))
+            out += pad(level) + "return " + wret + "\n";
+        return;
+    }
     // A Lean `do` sequence cannot end in `let`, and cannot be empty.
     if (list.empty() || list.back().kind == Stmt::Kind::Decl || list.back().kind == Stmt::Kind::CallStmt)
         out += pad(level) + "pure ()\n";
@@ -426,7 +468,11 @@ void emitStmts(const std::vector<Stmt>& list, int level, std::string& out,
 void emitFunction(const Function& f, const std::string& fileName, std::string& out) {
     out += "-- c: " + fileName + ":" + std::to_string(f.defLine) + "\n";
     emitComments(f.comments, "", out);
-    bool oneReturn = f.body.size() == 1 && f.body[0].kind == Stmt::Kind::Return;
+    const bool writer = f.writerParam >= 0;  // OD11 (c): the written array parameter comes back
+    const std::string wret = writer ? f.params[(size_t)f.writerParam].second : "";
+    // A writer's one-statement body can only be `return;`, which needs the `do`
+    // block's `return a` — so writers never take the single-expression shortcut.
+    bool oneReturn = !writer && f.body.size() == 1 && f.body[0].kind == Stmt::Kind::Return;
     if (oneReturn) emitComments(f.body[0].comments, "", out);  // no `do` block to hold them
     if (f.recursive && !f.isPartial)
         out += "-- note: recursive. Lean must prove it terminates; if it cannot, put "
@@ -454,7 +500,8 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
         }
         out += ")";
     }
-    out += " : " + leanName(f.retType) + " := ";
+    // A writer returns the array it modified instead of `Unit` (OD11 c).
+    out += " : " + leanName(writer ? f.params[(size_t)f.writerParam].first : f.retType) + " := ";
     if (oneReturn) {
         if (f.body[0].noValue) out += "()";
         else emitExpr(f.body[0].expr, out);
@@ -469,7 +516,7 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
             if (param.second == p) ty = param.first;
         out += pad(1) + "let mut " + p + " : " + leanName(ty) + " := " + p + "\n";
     }
-    emitStmts(f.body, 1, out, &f.bodyTrailing);
+    emitStmts(f.body, 1, wret, writer, out, &f.bodyTrailing);
 }
 
 }  // namespace

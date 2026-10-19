@@ -110,18 +110,22 @@ update impl-spec.md (the types table) and error-codes.md.
 | `printf` / `IO` (§8)                 | purity inference (D7) in `emitFunction`; makes `void` functions observable |
 | `bv_*` helpers (§5.4)                | calls to known names in `check.cpp` `Call`; signatures in types.cpp       |
 | `<string.h>` helpers (§12.3)         | same: known names in `Call`, `String` arguments                           |
-| array-parameter writes (OD11)        | `check.cpp` where the refusal citing OD11 is raised                       |
+| writer extensions (D20)              | `findWriters` in `check.cpp` (fixpoint + refusals), `Stmt::writeBack` and `wret` in `emitter.cpp` — a row write-back (`fill(m[1], n)`) or a tuple return slots in there |
 | `switch` on `uint8_t`/`bv`/`char`    | lift the guard in `check.cpp` `switchStmt` once Lean accepts the patterns |
 
 Done and worth reading as worked examples: arrays (`Type::arrayOf`,
 `Expr::Kind::Index`/`ArrayLit`, `initList`, `declStmt` in check.cpp),
 strings (`StringLit`, `String` rows in `unify`/`convert`), `void`
-(`CallStmt`, `return;`).
+(`CallStmt`, `return;`), and the `void` array writers (`findWriters` in
+check.cpp, `writerParam`/`writeBack` and the value-yielding `if`/`match`
+paths in `emitter.cpp`).
 
-**Unverified Lean names** (the sandbox that wrote them had no Lean; the
-owner has verified slices 0–5, not void/string/array/mixing): see impl-spec.md
-"Known simplifications". If `make test` fails in a
-`.checks.lean` for one of the new types, the name list there is where to
+**Lean name provenance.** The sandbox that wrote the slices up to `void` had
+no Lean; the names from those slices (`Array.replicate`, `Array.set!`,
+`String.toList`, the `let _ := f x` statement shape) and the slice-7 writer
+shapes have since been verified by the owner running the whole suite on
+Lean 4.35.0 (2026-10-19). If a `.checks.lean` ever fails on a new type, the
+name list in impl-spec.md "Known simplifications" is where to
 look first; fix it in `convert` / `leanName` / `truthTest`.
 
 ### Recipe 1b — add a lint

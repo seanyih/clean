@@ -5,8 +5,8 @@ place. Agents may add rows and keep the references fresh; **only the human
 decides.**
 
 **When a decision is made:** the row moves to
-[design-decisions.md](design-decisions.md) as the next free number (D18,
-D19, …), and the main-spec sections it touches are updated in the same
+[design-decisions.md](design-decisions.md) as the next free number (D21,
+D22, …), and the main-spec sections it touches are updated in the same
 change. Until then nothing here is normative — this file is a queue, not an
 agreement.
 
@@ -22,7 +22,6 @@ agreement.
 | OD6  | **Is C-authored hardware wanted at all** — `HW` bodies with `REG`/`NEXT` (tiers S1/S2) — or does `sparkle.h` stay at the boundary (`HW extern` only, tier S0)? Decides whether v0.3 builds S1/S2. | main-spec §17.4, §15 (v0.3 row) (was §16 Q7)                                                                | (a) build S1/S2; (b) boundary only (S0), revisit later.                                                                                                              |
 | OD7  | **`NEXT(reg, expr)` spelling.** Updates are non-blocking: all `NEXT`s land together at the clock edge, like Verilog `<=`. Moot if OD6 says no.                                                  | main-spec §17.4 (S2 semantics) (was §16 Q8)                                                                 | (a) accept `NEXT` as specced; (b) pick another spelling.                                                                                                              |
 | OD10 | **Permanent refusals and the E000 placeholder.** `E000` is documented as "not translated in the current slice", but the build also uses it for refusals that will never gain a feature: unknown name/callee, arity mismatch, missing return, unreachable code, duplicates, bare-block shadowing, comparison-as-value. | src/diag.h, impl-spec.md "Diagnostic codes", [error-codes.md](error-codes.md) (E000 note)                   | (a) give them their own catalogue block (e.g. E0xx) so every message has a stable number; (b) declare E000 their permanent home and document that.                                                     |
-| OD11 | **Writes through an array parameter.** C's `void fill(int a[], int n) { a[0] = 1; }` changes the caller's array; Lean passes arrays by value, so the write would silently disappear. Today clean **refuses** any write to an array parameter (check.cpp). Reading is fine, and so are writes to local arrays. Arrays cannot be returned yet, so there is no way to get a modified array out of a function. | main-spec §4.6 (output parameters 🟡), impl-spec.md "Known simplifications", error-codes.md (E101 note) | (a) keep refusing until output parameters exist; (b) allow it with copy semantics (`let mut a := a`, like scalar parameters) and a lint, accepting that the caller never sees the write; (c) translate `void f(T a[], …)` writers to a function that returns the new array (the §4.6 "return value / tuple" idea). |
 
 ## Provisional decisions taken without asking (veto window open)
 

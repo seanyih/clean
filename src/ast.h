@@ -95,6 +95,9 @@ struct Stmt {
     std::vector<long long> dims;      // Decl of an array: the declared sizes, outermost first
     bool noInit = false;              // Decl: `T a[N];` with no `=` (arrays are zero-filled, §4.4)
     std::vector<Expr> indices;        // Assign: the `[i][j]` of an element assignment
+    std::string writeBack;            // CallStmt only: the callee writes one of its array
+                                      // parameters (OD11 c); this variable receives the returned
+                                      // array, emitted `x := f …` instead of `let _ := f …`
     bool noValue = false;             // Return: `return;` in a `void` function
     std::vector<Comment> comments;    // comments the parser attached to this statement
     std::vector<Comment> bodyTrailing; // If: before the then-branch's `}`; Block: before its `}`
@@ -130,6 +133,9 @@ struct Function {
     int defLine = 0;                    // line of the leading `int` (D9: `-- c: file:LINE`)
     bool isPartial = false;             // `[[lean::partial]]` → `partial def`
     std::vector<std::string> mutParams; // parameters the body assigns (check.cpp) → `let mut a := a`
+    int writerParam = -1;               // `void` function that writes exactly one array parameter
+                                       // (OD11 c, check.cpp): that parameter's index; -1 = none.
+                                       // The emitter returns the modified array instead of Unit.
     bool recursive = false;             // reaches itself through calls (toposort.cpp)
     int mutualGroup = -1;               // ≥ 0: member of a `mutual … end` block with this id (toposort.cpp)
 };
