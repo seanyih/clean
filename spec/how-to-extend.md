@@ -1,7 +1,7 @@
 # How to extend `clean` — a developer's manual
 
 For downstream developers: where a feature lives, which files to touch, and
-how to prove it works. State: slices 0–5 (2026-10-17). If the architecture
+how to prove it works. State: slices 0–6 (2026-10-19). If the architecture
 moves, update this file with your slice.
 
 ## The pipeline (src/)
@@ -20,6 +20,9 @@ moves, update this file with your slice.
       │                              (Expr::type) and implicit conversions,
       │                              tests-vs-values, every path returns,
       │                              switch rules, marks which locals are `mut`
+      ▼
+    lint.cpp      AST → notes       only with --lint=c-semantics: "C would behave
+      │                              differently here" (W-codes); never edits the AST
       ▼
     toposort.cpp  AST → AST         callees first; finds recursion / mutual groups
       │
@@ -75,10 +78,14 @@ each were). In `types.h` / `types.cpp`:
    - `truthTest` — how a value becomes a test (main-spec §5.2);
    - `checkBinaryOp` / `checkUnaryOp` — which operators exist on it (bitwise
      on `Int` → E303, `%` on floats, …);
-   - `unify` — what happens when it meets another type (default: refused);
+   - `unify` — the common type when it meets another (D19 rank rule:
+     `Nat < Int < intN_t/uintN_t < bv(N) < Float32 < Float`); default: refused;
+   - `checkCompare`, `zeroValue` — which comparisons exist, and the value
+     that pads/defaults an array of it;
    - `flowKind` / `convert` — implicit conversions and casts (§5.3). `convert`
      writes the Lean for each (from, to) pair; a missing pair is refused with
-     "cast through …".
+     "cast through …". The checker inserts a `Cast` node wherever
+     `flowKind`/`unify` says Convert, so the emitter never converts by itself.
 4. If the type has literals, teach the lexer a token (`FloatLit`, `CharLit`),
    the parser an `Expr::Kind`, check.cpp `valueType` its type, emitter.cpp
    `emitExpr` its spelling. (`BvLit`, `FloatLit`, `CharLit`, `BoolLit` are
@@ -98,17 +105,41 @@ update impl-spec.md (the types table) and error-codes.md.
 
 | Feature (main-spec)                  | Hook                                                                      |
 | ------------------------------------ | ------------------------------------------------------------------------- |
-| typedefs, structs, enums (§4.5)      | file-scope declarations in `TranslationUnit` + `toposort.cpp` ordering; a `Type::Kind` that carries a name (add fields to `Type`, update `operator==`) |
-| arrays (§4.4), strings (§4.3)        | a `Kind` with an element type (`Type` gets a child); `a[i]` as an `Expr::Kind` |
-| `void` / `IO` (§8)                   | return type + purity inference (D7) in `emitFunction`                      |
+| typedefs, structs, enums (§4.5)      | file-scope declarations in `TranslationUnit` + `toposort.cpp` ordering; a `Type::Kind` that carries a name (`Type` already has `args`; add a name field, update `operator==`) |
+| loops (§6.1), `?:`                   | recipe 3 (statement) / a new `Expr::Kind`; loops need `mut` marking and a termination story in `emitFunction` |
+| `printf` / `IO` (§8)                 | purity inference (D7) in `emitFunction`; makes `void` functions observable |
 | `bv_*` helpers (§5.4)                | calls to known names in `check.cpp` `Call`; signatures in types.cpp       |
+| `<string.h>` helpers (§12.3)         | same: known names in `Call`, `String` arguments                           |
+| array-parameter writes (OD11)        | `check.cpp` where the refusal citing OD11 is raised                       |
 | `switch` on `uint8_t`/`bv`/`char`    | lift the guard in `check.cpp` `switchStmt` once Lean accepts the patterns |
-| lints W001–W011                      | a pass after check; `convert`/`unify` already know where they apply       |
 
-**Unverified Lean names** (never run — the sandbox that wrote them had no
-Lean): see impl-spec.md "Known simplifications". If `make test` fails in a
+Done and worth reading as worked examples: arrays (`Type::arrayOf`,
+`Expr::Kind::Index`/`ArrayLit`, `initList`, `declStmt` in check.cpp),
+strings (`StringLit`, `String` rows in `unify`/`convert`), `void`
+(`CallStmt`, `return;`).
+
+**Unverified Lean names** (the sandbox that wrote them had no Lean; the
+owner has verified slices 0–5, not void/string/array/mixing): see impl-spec.md
+"Known simplifications". If `make test` fails in a
 `.checks.lean` for one of the new types, the name list there is where to
 look first; fix it in `convert` / `leanName` / `truthTest`.
+
+### Recipe 1b — add a lint
+
+A lint says where C behaves differently from the Lean that clean emits
+(D4, D18). It is opt-in (`--lint=c-semantics`), reports to stderr, never
+changes the output and never fails the build.
+
+1. Take the next free W-number in [error-codes.md](error-codes.md) (a lint
+   outside the catalogue is a spec change: raise it with the human).
+2. `src/lint.cpp`: add a check in `Linter::expr` (or `stmts` / `type`) that
+   calls `report(code, loc, what, why, fix)`. The tree is already typed and
+   already carries the implicit `Cast` nodes, so test `e.type`,
+   `e.kids[i].type` and `Expr::Kind::Cast` rather than re-deriving anything.
+   `report` keeps the first place per code and counts the rest.
+3. Add the line to the table in lint.h, flip the status in error-codes.md.
+4. Prove it: add the trigger to `test/cases-lint/c_semantics.c` and the
+   expected stderr to `c_semantics.expected.lint`.
 
 ## Recipe 2 — extend the Lean keyword exclusion list
 
@@ -153,6 +184,7 @@ silently, never guess (D5).
     make test                       # build + end-to-end suite (see impl-spec for the count)
     release/clean foo.c             # → foo.lean
     release/clean foo.c -o bar.lean
+    release/clean foo.c --lint=c-semantics   # also print the W-lints
 
 - `test/cases/` — must translate; output is diffed against
   `<name>.expected.lean`; `<name>.checks.lean` is appended and the whole
@@ -160,6 +192,9 @@ silently, never guess (D5).
 - `test/cases-should-fail/` — clean must exit 1 with a diagnostic.
 - `test/cases-lean-rejects/` — clean must succeed and `lean` must then refuse
   (things only Lean can judge, e.g. unproven termination).
+- `test/cases-lint/` — run with `--lint=c-semantics`: stderr must equal
+  `<name>.expected.lint` and the Lean output must equal a run without the
+  flag. Normal cases must print no W-lint by default.
 - Lean-dependent steps are skipped, with a notice, when `lean` is not on
   PATH.
 

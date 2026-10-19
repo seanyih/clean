@@ -1,2 +1,2 @@
-// `void` (→ Unit / IO Unit) lands with the I/O slice
-void f(int x) { return; }
+// structs, enums and typedefs land in a later slice
+struct P { int x; };

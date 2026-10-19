@@ -8,8 +8,8 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic
 
 BIN  := release/clean
-SRCS := src/main.cpp src/lexer.cpp src/parser.cpp src/types.cpp src/check.cpp src/toposort.cpp src/emitter.cpp
-HDRS := src/diag.h src/types.h src/ast.h src/lexer.h src/parser.h src/check.h src/toposort.h src/emitter.h
+SRCS := src/main.cpp src/lexer.cpp src/parser.cpp src/types.cpp src/check.cpp src/lint.cpp src/toposort.cpp src/emitter.cpp
+HDRS := src/diag.h src/types.h src/ast.h src/lexer.h src/parser.h src/check.h src/lint.h src/toposort.h src/emitter.h
 
 .PHONY: all test clean
 

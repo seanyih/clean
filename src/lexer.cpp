@@ -81,6 +81,18 @@ struct Lexer {
             }
         }
         if (!atEnd()) step();  // the newline itself
+        if (word == "pragma") {  // `#pragma lean NAME`
+            size_t k = 0;
+            while (k < rest.size() && (rest[k] == ' ' || rest[k] == '\t')) ++k;
+            if (rest.compare(k, 4, "lean") == 0) {
+                k += 4;
+                while (k < rest.size() && (rest[k] == ' ' || rest[k] == '\t')) ++k;
+                size_t e = k;
+                while (e < rest.size() && isIdentChar(rest[e])) ++e;
+                if (e > k) res.pragmas.insert(rest.substr(k, e - k));
+            }
+            return;
+        }
         if (word != "define") return;
         size_t k = 0;
         while (k < rest.size() && (rest[k] == ' ' || rest[k] == '\t')) ++k;
@@ -212,12 +224,51 @@ struct Lexer {
         return t;
     }
 
+    // The escape sequence after a `\` (already consumed), re-spelled the way Lean
+    // writes it; shared by character and string literals.
+    std::string escape(Loc at, const char* what) {
+        char e = cur();
+        step();
+        switch (e) {
+        case 'n': return "\\n";
+        case 't': return "\\t";
+        case 'r': return "\\r";
+        case '\\': return "\\\\";
+        case '\'': return "\\'";
+        case '"': return "\\\"";
+        case 'a': return "\\x07";
+        case 'b': return "\\x08";
+        case 'f': return "\\x0c";
+        case 'v': return "\\x0b";
+        default: break;
+        }
+        static const char* hex = "0123456789abcdef";
+        if (e >= '0' && e <= '7') {  // octal: up to three digits
+            int v = e - '0';
+            for (int k = 0; k < 2 && cur() >= '0' && cur() <= '7'; ++k) {
+                v = v * 8 + (cur() - '0');
+                step();
+            }
+            if (v > 255) fail(at.line, at.col, std::string("octal escape out of range in a ") + what, "use at most `\\377`.");
+            return std::string("\\x") + hex[(v >> 4) & 15] + hex[v & 15];
+        }
+        if (e == 'x' && isHexDigit(cur()) && isHexDigit(peekAt(1))) {
+            std::string out = std::string("\\x") + (char)std::tolower(cur()) + (char)std::tolower(peekAt(1));
+            step();
+            step();
+            return out;
+        }
+        fail(at.line, at.col, std::string("unsupported escape in a ") + what,
+             "use `\\n`, `\\t`, `\\0`, `\\xHH` or a plain character.");
+    }
+
+    // `"abc"` → `"abc"`, escapes re-spelled for Lean.
     Token stringLit() {
         Token t;
-        t.kind = Token::Kind::Other;
-        t.text = "string literal";
+        t.kind = Token::Kind::StringLit;
         t.loc = {line, col};
         step();  // '"'
+        std::string body;
         while (true) {
             if (atEnd() || cur() == '\n')
                 fail(t.loc.line, t.loc.col, "unterminated string literal", "close it with `\"`.");
@@ -225,9 +276,15 @@ struct Lexer {
                 step();
                 break;
             }
-            if (cur() == '\\' && peekAt(1) != '\0') step();  // skip escaped char
-            step();
+            if (cur() == '\\') {
+                step();
+                body += escape(t.loc, "string literal");
+            } else {
+                body += cur();  // plain characters, UTF-8 bytes included, pass through
+                step();
+            }
         }
+        t.text = "\"" + body + "\"";
         return t;
     }
 
@@ -242,37 +299,8 @@ struct Lexer {
             fail(t.loc.line, t.loc.col, "unterminated character literal", "close it with `'`.");
         if (cur() == '\\') {
             step();
-            char e = cur();
-            step();
-            switch (e) {
-            case 'n': body = "\\n"; break;
-            case 't': body = "\\t"; break;
-            case 'r': body = "\\r"; break;
-            case '\\': body = "\\\\"; break;
-            case '\'': body = "\\'"; break;
-            case '"': body = "\""; break;
-            case 'a': body = "\\x07"; break;
-            case 'b': body = "\\x08"; break;
-            case 'f': body = "\\x0c"; break;
-            case 'v': body = "\\x0b"; break;
-            default:
-                if (e >= '0' && e <= '7') {  // octal: up to three digits
-                    int v = e - '0';
-                    for (int k = 0; k < 2 && cur() >= '0' && cur() <= '7'; ++k) {
-                        v = v * 8 + (cur() - '0');
-                        step();
-                    }
-                    static const char* hex = "0123456789abcdef";
-                    body = std::string("\\x") + hex[(v >> 4) & 15] + hex[v & 15];
-                } else if (e == 'x' && isHexDigit(cur()) && isHexDigit(peekAt(1))) {
-                    body = std::string("\\x") + (char)std::tolower(cur()) + (char)std::tolower(peekAt(1));
-                    step();
-                    step();
-                } else {
-                    fail(t.loc.line, t.loc.col, "unsupported escape in a character literal",
-                         "use `\\n`, `\\t`, `\\0`, `\\xHH` or a plain character.");
-                }
-            }
+            body = escape(t.loc, "character literal");
+            if (body == "\\\"") body = "\"";  // `'\"'` is just `'"'`
         } else if (cur() == '\'') {
             fail(t.loc.line, t.loc.col, "empty character literal", "write a character between the quotes.");
         } else if ((unsigned char)cur() >= 0x80) {

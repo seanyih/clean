@@ -27,6 +27,12 @@ public:
         : std::runtime_error(what), code_(std::move(code)), file_(std::move(file)),
           loc_(loc), why_(std::move(why)), fix_(std::move(fix)) {}
 
+    const std::string& code() const { return code_; }
+    const std::string& file() const { return file_; }
+    Loc loc() const { return loc_; }
+    const std::string& why() const { return why_; }
+    const std::string& fix() const { return fix_; }
+
     // §13.1:
     //   E000  file.c:LINE:COL  <what>
     //         why:  <one sentence>

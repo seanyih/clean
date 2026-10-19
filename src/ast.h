@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,9 +18,13 @@
 //   IntLit   text = literal spelling, kept verbatim (`42`, `0xFF`, `0b101`)
 //   FloatLit text = Lean spelling of a floating literal (`1.5`, `2e3`)
 //   CharLit  text = Lean spelling of a character literal, quotes included (`'a'`)
+//   StringLit text = Lean spelling of a string literal, quotes included (`"a\n"`)
 //   BoolLit  text = `true` / `false`
 //   BvLit    text = the value, `type` the width: `BV(8, 0x63)` → `0x63#8`
 //   Ident    text = a parameter or local name
+//   Index    `a[i]`: kids [array or string, index]
+//   ArrayLit `{1, 2, 3}` (only as the initialiser of an array local): kids = elements,
+//            nested lists for `T a[M][N]`
 //   UnaryNeg one kid: `-x`
 //   BitNot   one kid: `~x`
 //   Cast     one kid, `type` = target: `(T)x`, or an implicit conversion
@@ -34,8 +39,8 @@
 // Anywhere else they are refused.
 struct Expr {
     enum class Kind {
-        IntLit, FloatLit, CharLit, BoolLit, BvLit, Ident, UnaryNeg, BitNot, Cast,
-        Binary, Call, Cmp, And, Or, Not
+        IntLit, FloatLit, CharLit, StringLit, BoolLit, BvLit, Ident, Index, ArrayLit,
+        UnaryNeg, BitNot, Cast, Binary, Call, Cmp, And, Or, Not
     };
     Kind kind = Kind::IntLit;
     std::string text;
@@ -66,15 +71,19 @@ struct Case {
 
 // A statement. The fields used depend on `kind`:
 //   Decl    `T name = expr;`        type, name, expr, mut   (T = any type types.h knows)
+//           `T name[N]…;` `= {…};`  type = Array…, dims = the declared sizes (-1 = left out,
+//                                   inferred from the list), noInit when there is no `=`
 //   Assign  `name = expr;`          name, expr   (`+=`, `++` … are desugared by the parser)
+//           `name[i][j] = expr;`    + indices = [i, j]
+//   CallStmt `f(args);`             expr = the Call (only legal for a `void` function)
 //   If      `if (expr) body else elseBody`   expr, body, elseBody (empty = no else)
-//   Return  `return expr;`          expr
+//   Return  `return expr;`          expr   (`return;`: noValue)
 //   Switch  `switch (expr) {…}`     expr, cases
 //   Block   `{ body }`              body
 //   Break   `break;`                only transient: the parser strips the legal
 //                                   ones from switch cases and rejects the rest
 struct Stmt {
-    enum class Kind { Decl, Assign, If, Return, Switch, Block, Break };
+    enum class Kind { Decl, Assign, CallStmt, If, Return, Switch, Block, Break };
     Kind kind = Kind::Return;
     std::string name;
     Type type;                          // Decl: the declared type
@@ -83,6 +92,10 @@ struct Stmt {
     std::vector<Stmt> elseBody;
     std::vector<Case> cases;
     bool mut = false;                 // Decl: assigned again later → `let mut` (set by check.cpp)
+    std::vector<long long> dims;      // Decl of an array: the declared sizes, outermost first
+    bool noInit = false;              // Decl: `T a[N];` with no `=` (arrays are zero-filled, §4.4)
+    std::vector<Expr> indices;        // Assign: the `[i][j]` of an element assignment
+    bool noValue = false;             // Return: `return;` in a `void` function
     std::vector<Comment> comments;    // comments the parser attached to this statement
     std::vector<Comment> bodyTrailing; // If: before the then-branch's `}`; Block: before its `}`
     std::vector<Comment> elseTrailing; // If: before the else-branch's `}`
@@ -95,7 +108,11 @@ struct Stmt {
 template <class F>
 void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
     for (const Stmt& s : stmts) {
-        if (s.kind != Stmt::Kind::Block && s.kind != Stmt::Kind::Break) f(s.expr);
+        for (const Expr& ix : s.indices) f(ix);
+        const bool noExpr = s.kind == Stmt::Kind::Block || s.kind == Stmt::Kind::Break ||
+                            (s.kind == Stmt::Kind::Decl && s.noInit) ||
+                            (s.kind == Stmt::Kind::Return && s.noValue);
+        if (!noExpr) f(s.expr);
         forEachExpr(s.body, f);
         forEachExpr(s.elseBody, f);
         for (const Case& c : s.cases) forEachExpr(c.body, f);
@@ -121,5 +138,7 @@ struct Function {
 struct TranslationUnit {
     std::string fileName;               // base name, e.g. "arith.c", used in comments
     std::vector<Function> functions;    // parser: source order; after sortDefinitions(): callees first
+    std::set<std::string> pragmas;      // `#pragma lean NAME` words (set by main from the lexer)
+    std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build
     std::vector<Comment> trailingComments;  // comments after the last definition
 };

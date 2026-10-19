@@ -75,8 +75,10 @@ struct Var {
 
 struct Checker {
     const std::string& file;
-    const std::map<std::string, Sig>& sigs;  // function name → arity and return type
+    const std::map<std::string, Sig>& sigs;  // function name → parameter types and return type
     Function& fn;
+    const std::set<std::string>& pragmas;    // `#pragma lean …` words
+    std::vector<DiagError>& notes;           // hints (H…) the unit carries to main
     // scopes[0] holds the parameters and the function's top-level locals.
     std::vector<std::map<std::string, Var>> scopes;
     std::vector<bool> bare;  // per scope: opened by a bare `{ }` block (flattened in Lean)
@@ -112,7 +114,30 @@ struct Checker {
 
     Type value(Expr& e) {
         e.type = valueType(e);
+        if (e.type.kind == Type::Kind::Unit)
+            fail(file, e.loc, "the result of a `void` call is used as a value",
+                 "a `void` function returns nothing.", "call it as a statement, on its own line.");
         return e.type;
+    }
+
+    // `e` has type `e.type`; make it `target` by inserting the conversion main-spec §5.3 names
+    // (decision D19). A literal needs none: Lean reads the numeral at the type it is used at.
+    void wrapCast(Expr& e, Type target) {
+        Expr inner = std::move(e);
+        e = Expr();
+        e.kind = Expr::Kind::Cast;
+        e.implicit = true;
+        e.type = target;
+        e.loc = inner.loc;
+        e.kids.push_back(std::move(inner));
+    }
+
+    void coerce(Expr& e, Type target) {
+        if (e.type == target || isLiteral(e.type)) return;
+        std::string why, fix;
+        if (convert(e.type, target, "x", &why, &fix).empty())
+            fail(file, e.loc, "cannot convert `" + cName(e.type) + "` to `" + cName(target) + "`", why, fix);
+        wrapCast(e, target);
     }
 
     Type valueType(Expr& e) {
@@ -123,6 +148,19 @@ struct Checker {
             return Type::of(Type::Kind::FloatLiteral);
         case Expr::Kind::CharLit:
             return Type::of(Type::Kind::Char);
+        case Expr::Kind::StringLit:
+            return Type::of(Type::Kind::String);
+        case Expr::Kind::ArrayLit:
+            fail(file, e.loc, "a `{ … }` list outside an array initialiser",
+                 "main-spec §4.4 accepts it only as `T a[N] = { … };`.", "write the elements one by one.");
+        case Expr::Kind::Index: {
+            Type base = value(e.kids[0]);
+            if (base.kind != Type::Kind::Array && base.kind != Type::Kind::String)
+                fail(file, e.loc, "indexing a `" + cName(base) + "`", "only arrays and strings can be indexed.",
+                     "index an array.");
+            valueAs(e.kids[1], Type::of(Type::Kind::Nat));  // `a[i]!` takes a `Nat` (§5.3 conversion if needed)
+            return base.kind == Type::Kind::String ? Type::of(Type::Kind::Char) : base.elem();
+        }
         case Expr::Kind::BoolLit:
             return Type::of(Type::Kind::Bool);
         case Expr::Kind::BvLit:
@@ -157,11 +195,26 @@ struct Checker {
         case Expr::Kind::Binary: {
             Type l = value(e.kids[0]);
             Type r = value(e.kids[1]);
-            Unified u = unify(l, r);
-            if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
-            OpRule op = checkBinaryOp(e.text, u.type);
+            const bool shift = e.text == "<<" || e.text == ">>";
+            const bool bitwise = shift || e.text == "&" || e.text == "|" || e.text == "^";
+            if (bitwise && (l.kind == Type::Kind::Char || r.kind == Type::Kind::Char)) {
+                OpRule op = checkBinaryOp(e.text, Type::of(Type::Kind::Char));  // H004
+                failDiag(op.code, e.loc, op.problem, op.why, op.fix);
+            }
+            Type result;
+            if (shift && !isLiteral(l)) {  // C: the result has the left operand's type; the count converts to it
+                result = l;
+                coerce(e.kids[1], l);
+            } else {
+                Unified u = unify(l, r);
+                if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
+                result = u.type;
+                coerce(e.kids[0], result);
+                coerce(e.kids[1], result);
+            }
+            OpRule op = checkBinaryOp(e.text, result);
             if (!op.ok) failDiag(op.code, e.loc, op.problem, op.why, op.fix);
-            return u.type;
+            return result;
         }
         case Expr::Kind::Call: {
             Var v;
@@ -194,16 +247,16 @@ struct Checker {
         return e.type;  // unreachable: every case above returns or throws
     }
 
-    // `a OP b` of a comparison: both sides numbers (or bools/chars) of one type.
+    // `a OP b` of a comparison: both sides converted to their common type (D19).
     void cmpOperands(Expr& e) {
         Type l = value(e.kids[0]);
         Type r = value(e.kids[1]);
-        Unified u = unify(l, r);
+        Unified u = unify(l, r, true);
         if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
-        const bool eq = e.text == "==" || e.text == "!=";
-        if (u.type.kind == Type::Kind::Bool && !eq)
-            fail(file, e.loc, "`" + e.text + "` on `bool`", "Lean's `Bool` has no order; only `==` and `!=`.",
-                 "compare the underlying numbers instead.");
+        OpRule c = checkCompare(e.text, u.type);
+        if (!c.ok) failDiag(c.code, e.loc, c.problem, c.why, c.fix);
+        coerce(e.kids[0], u.type);
+        coerce(e.kids[1], u.type);
     }
 
     // A `bool`-valued expression: `a < b`, `p && q`, `!p`, or any `bool`.
@@ -243,23 +296,20 @@ struct Checker {
                      "Lean's `" + leanName(target) + "` cannot hold it.",
                      "use a non-negative value, or an `int`/`intN_t` type.");
             return;
-        case Flow::Convert: {
-            Expr inner = std::move(e);
-            e = Expr();
-            e.kind = Expr::Kind::Cast;
-            e.implicit = true;
-            e.type = target;
-            e.loc = inner.loc;
-            e.kids.push_back(std::move(inner));
+        case Flow::Convert:
+            wrapCast(e, target);
             return;
-        }
         case Flow::Refuse: {
             const bool bits = t.kind == Type::Kind::BitVec && target.kind == Type::Kind::BitVec;
+            std::string why, fix;
+            convert(t, target, "x", &why, &fix);
+            if (isLiteral(t)) {
+                why = "the literal would be truncated; clean does not guess.";
+                fix = "write a value of the target type.";
+            }
             failDiag(bits ? "E301" : "E000", e.loc,
                      "a value of type `" + cName(t) + "` is used where `" + cName(target) + "` is expected",
-                     bits ? "a bit-vector operation needs equal widths; Lean rejects the rest."
-                          : "Lean has no implicit conversion between them, and clean does not pick one (D5).",
-                     "cast it explicitly: `(" + cName(target) + ")x`.");
+                     why, fix);
         }
         }
     }
@@ -345,6 +395,59 @@ struct Checker {
         }
     }
 
+    // `{1, 2, 3}` / `{{1, 2}, {3, 4}}` as the initialiser of an array of type `arr`;
+    // `dims[depth]` is the declared size at this level (-1 = take it from the list).
+    void initList(Expr& lit, Type arr, std::vector<long long>& dims, size_t depth) {
+        const long long k = (long long)lit.kids.size();
+        if (dims[depth] >= 0 && k > dims[depth])
+            fail(file, lit.loc, "too many initialisers: " + std::to_string(k) + " for an array of " +
+                     std::to_string(dims[depth]),
+                 "C rejects it too.", "drop the extra values, or enlarge the array.");
+        if (dims[depth] < 0) {
+            if (k == 0)
+                fail(file, lit.loc, "an array with no size and no elements", "C rejects `a[] = {}`.",
+                     "write the size or the elements.");
+            dims[depth] = k;
+        }
+        lit.type = arr;
+        const Type elem = arr.elem();
+        for (Expr& kid : lit.kids) {
+            if (elem.kind == Type::Kind::Array) {
+                if (kid.kind != Expr::Kind::ArrayLit)
+                    fail(file, kid.loc, "a row of the array must be a `{ … }` list", "the array has more than one dimension.",
+                         "write `{ … }` for each row.");
+                initList(kid, elem, dims, depth + 1);
+            } else {
+                if (kid.kind == Expr::Kind::ArrayLit)
+                    fail(file, kid.loc, "a nested `{ … }` for a one-dimensional array",
+                         "C would accept braces around a scalar; Lean has no such thing.", "drop the inner braces.");
+                valueAs(kid, elem);
+            }
+        }
+    }
+
+    void declStmt(Stmt& s) {
+        if (s.type.kind != Type::Kind::Array) {
+            valueAs(s.expr, s.type);
+            return;
+        }
+        for (size_t d = 1; d < s.dims.size(); ++d)
+            if (s.dims[d] < 0)
+                fail(file, s.loc, "only the first size of `" + s.name + "` may be left out",
+                     "C rejects `a[2][]` too.", "write every size but the first.");
+        if (!s.noInit) initList(s.expr, s.type, s.dims, 0);
+        Type inner = s.type;
+        while (inner.kind == Type::Kind::Array) inner = inner.elem();
+        if (inner.kind == Type::Kind::Bool && s.dims.size() == 1 && s.dims[0] > 0 &&
+            !pragmas.count("allow_bool_array")) {  // H001 (main-spec §4.4)
+            const std::string n = std::to_string(s.dims[0]);
+            notes.push_back(DiagError(
+                "H001", file, s.loc, "`bool " + s.name + "[" + n + "]` — did you mean `bv(" + n + ") " + s.name + "`?",
+                "a bit-vector gets Lean's BitVec tactics (bv_decide, omega on bit ops); `Array Bool` does not.",
+                "rewrite as `bv(" + n + ") " + s.name + ";`, or silence with `#pragma lean allow_bool_array`."));
+        }
+    }
+
     void stmts(std::vector<Stmt>& list) {
         bool dead = false;
         for (Stmt& s : list) {
@@ -354,7 +457,7 @@ struct Checker {
                      "delete it, or move the `return` below it.");
             switch (s.kind) {
             case Stmt::Kind::Decl:
-                valueAs(s.expr, s.type);  // the name is not in scope in its own initialiser
+                declStmt(s);  // the name is not in scope in its own initialiser
                 if (scopes.back().count(s.name))
                     fail(file, s.loc, "`" + s.name + "` is declared twice in the same scope",
                          "C rejects it, and Lean would silently shadow it.", "rename one of them.");
@@ -370,8 +473,39 @@ struct Checker {
                 break;
             case Stmt::Kind::Assign: {
                 Var target;
-                if (lookup(s.name, target)) valueAs(s.expr, target.type);
+                if (lookup(s.name, target)) {
+                    Type t = target.type;
+                    for (Expr& idx : s.indices) {  // `a[i][j] = v`: walk down to the element type
+                        if (t.kind == Type::Kind::String)
+                            failCode("E101", file, s.loc, "mutation of a string by index",
+                                     "Lean strings are immutable (main-spec §4.3).",
+                                     "use an `Array Char`, or `uint8_t`/`bv(N)` arrays for byte buffers.");
+                        if (t.kind != Type::Kind::Array)
+                            fail(file, s.loc, "indexing `" + s.name + "`, which is not an array",
+                                 "only arrays can be indexed.", "index an array.");
+                        valueAs(idx, Type::of(Type::Kind::Nat));
+                        t = t.elem();
+                    }
+                    if (!s.indices.empty() && !target.decl)
+                        fail(file, s.loc, "`" + s.name + "` is an array parameter and is written to",
+                             "C would change the caller's array; Lean passes arrays by value, so the write "
+                             "would silently be lost (D5; see open decision OD11).",
+                             "copy it into a local array first, or compute the result and return it.");
+                    if (s.indices.empty() && t.kind == Type::Kind::Array)
+                        fail(file, s.loc, "assignment to the whole array `" + s.name + "`",
+                             "C rejects it too.", "assign the elements one by one.");
+                    valueAs(s.expr, t);
+                }
                 markAssigned(s);  // refuses unknown names and functions
+                break;
+            }
+            case Stmt::Kind::CallStmt: {
+                s.expr.type = valueType(s.expr);  // name, arity and arguments
+                if (s.expr.type.kind != Type::Kind::Unit)
+                    fail(file, s.expr.loc, "the result of `" + s.expr.text + "(…)` is discarded",
+                         "functions are pure in Lean; a discarded value does nothing "
+                         "(effects arrive with `printf` and IO).",
+                         "use the value: `T r = " + s.expr.text + "(…);`.");
                 break;
             }
             case Stmt::Kind::If:
@@ -380,7 +514,16 @@ struct Checker {
                 scoped(s.elseBody);
                 break;
             case Stmt::Kind::Return:
-                valueAs(s.expr, fn.retType);
+                if (fn.retType.kind == Type::Kind::Unit) {
+                    if (!s.noValue)
+                        fail(file, s.loc, "a `void` function returns a value", "`void` has no values.",
+                             "write `return;`.");
+                } else {
+                    if (s.noValue)
+                        fail(file, s.loc, "`return;` in `" + fn.name + "`, which returns `" + cName(fn.retType) + "`",
+                             "Lean needs a value on every path.", "write `return value;`.");
+                    valueAs(s.expr, fn.retType);
+                }
                 break;
             case Stmt::Kind::Switch:
                 switchStmt(s);
@@ -406,7 +549,7 @@ struct Checker {
             scopes[0][p.second] = Var{nullptr, p.first};
         }
         stmts(fn.body);
-        if (!returnsOnAllPaths(fn.body))
+        if (fn.retType.kind != Type::Kind::Unit && !returnsOnAllPaths(fn.body))
             fail(file, Loc{fn.defLine, 1},
                  "`" + fn.name + "` can reach the end of its body without returning a value",
                  "C leaves that undefined, and Lean needs a value on every path.",
@@ -427,5 +570,5 @@ void check(TranslationUnit& unit) {
         for (const auto& p : f.params) sig.params.push_back(p.first);
         sigs[f.name] = sig;
     }
-    for (Function& f : unit.functions) Checker{unit.fileName, sigs, f, {}, {}}.run();
+    for (Function& f : unit.functions) Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, {}, {}}.run();
 }

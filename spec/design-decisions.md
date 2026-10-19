@@ -2,7 +2,7 @@
 
 The agreement-level decisions of `clean`, extracted from main-spec §2.
 D1–D17 are quoted from there; every open question that gets decided
-([open-decisions.md](open-decisions.md)) is appended after D17 as D18+.
+([open-decisions.md](open-decisions.md)) is appended after D17 as D18+ (D18, D19 so far).
 
 - Section references (§…) point into main-spec.md.
 - D-numbers are stable — main-spec text refers to them (D4, D14, …). Do not renumber.
@@ -27,6 +27,8 @@ D1–D17 are quoted from there; every open question that gets decided
 | D15 | **Vanilla Lean and Sparkle Lean are separated by header.** `lean.h` knows nothing of Sparkle; `sparkle.h` includes `lean.h` and adds the Sparkle names under the `[[sparkle::…]]` attribute namespace. Output imports Sparkle only when the header is included and used (§17.2). | Contains Sparkle API churn to one header plus one emitter back-end; vanilla output never depends on Sparkle.                          |
 | D16 | **One attribute, `extern` decides where the module lives.** `HW extern T f(…);` = defined in Lean; `HW T f(…) { … }` = defined in C and translated (🟡).                                                                                         | One concept for the user; same call rule either way.                                                                                  |
 | D17 | **`HW` bodies always obey the `synth` subset**, whatever the file's profile (§17.4).                                                                                                                             | A hardware body that is not synthesizable is a bug, not a model.                                                                      |
+| D18 | **`/` and `%` on `Int` keep Lean's semantics; the difference from C is an opt-in lint.** `-7 / 2 = -4` and `-7 % 2 = 1` (Euclidean), not C's `-3` and `-1`. No `Int.tdiv`/`Int.tmod` is emitted. `--lint=c-semantics` reports it as **W014** (new code, §13.1), and a possibly-zero divisor as W005. | Consistent with D4 (C syntax, Lean semantics) and with §5.1 as written. Decided by the human (was OD8, option (a)). Implemented in `src/lint.cpp`. |
+| D19 | **A mix of types is converted, not refused.** Operands of different types are converted by the explicit Lean conversion of §5.3, to the type of higher rank (`Nat < Int < intN_t/uintN_t < bv(N) < Float32 < Float`; two fixed widths: the wider, then the unsigned one; a literal adapts; `char` is its code in arithmetic). Assignments, arguments and `return` convert to the declared type the same way. `bv(N)` with `bv(M)` (E301), and `bool`/`String`/arrays with anything, stay errors: §5.3 has no row. | The tool is syntax sugar (D4), so it should accept what C accepts and show the conversion Lean needs (D10). The rank rule is the part the main spec left open; written into §5.3. Decided by the human (was OD9, option (a)). Implemented in `types.cpp` (`unify`, `flowKind`, `convert`) and `check.cpp`. |
 
 ## Formerly open questions, already folded in
 

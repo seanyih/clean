@@ -1,2 +1,2 @@
-// Lean's Char has no arithmetic: go through (unsigned)
-char f(char c) { return c + 1; }
+// char + 1 is converted through Nat now (D19); negating a char is still refused
+char f(char c) { return -c; }

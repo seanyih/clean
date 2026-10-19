@@ -55,7 +55,8 @@ std::string describe(const Token& t) {
     case Token::Kind::Ident:   return "`" + t.text + "`";
     case Token::Kind::IntLit:
     case Token::Kind::FloatLit:
-    case Token::Kind::CharLit: return "literal `" + t.text + "`";
+    case Token::Kind::CharLit:
+    case Token::Kind::StringLit: return "literal `" + t.text + "`";
     case Token::Kind::Comment: return "a comment";  // unreachable: comments are lifted out before parsing
     case Token::Kind::Punct:   return "`" + t.text + "`";
     case Token::Kind::Other:   return "`" + t.text + "`";
@@ -187,6 +188,47 @@ struct Parser {
         return bitVecType(n, at);
     }
 
+    // `[N]` / `[]` after a name: the size (a literal or `#define NAME <integer>`), -1 when left out.
+    long long parseArraySize() {
+        expectPunct("[", "to open the array size");
+        long long n = -1;
+        if (!isPunct("]")) {
+            if (peek().kind == Token::Kind::IntLit && !(peek().text.size() > 1 && peek().text[1] == 'b')) {
+                n = std::strtoll(peek().text.c_str(), nullptr, 0);
+                ++i;
+            } else if (peek().kind == Token::Kind::Ident && macroValues.count(peek().text)) {
+                n = std::strtoll(macroValues.at(peek().text).c_str(), nullptr, 0);
+                ++i;
+            } else {
+                fail(file, peek().loc, "the size of an array is not a constant I can read",
+                     "variable-length arrays have no Lean counterpart, and the size is not part of the type.",
+                     "write a decimal literal, or `#define NAME 8` (a plain integer) and use `[NAME]`.");
+            }
+            if (n < 1)
+                fail(file, peek().loc, "an array needs at least one element", "C rejects `a[0]` too.",
+                     "write a positive size.");
+        }
+        expectPunct("]", "to close the array size");
+        return n;
+    }
+
+    // The `*`s and `[N]`s after a type, applied to it (types.cpp decides what they mean).
+    Type declare(Type base, int stars, size_t brackets, Loc at, bool isParam) {
+        TypeResolution r = applyDeclarator(base, stars, (int)brackets, isParam);
+        if (!r.ok) failCode(r.code.c_str(), file, at, r.problem, r.why, r.fix);
+        return r.type;
+    }
+
+    int parseStars() {
+        int n = 0;
+        while (isPunct("*")) {
+            ++n;
+            ++i;
+            while (isIdent("const") || isIdent("restrict")) ++i;  // `char *const p`
+        }
+        return n;
+    }
+
     // One C type: all consecutive type words (`unsigned long long int`),
     // resolved by types.cpp, or `bv(N)`. Knows no type by name itself.
     Type parseCType() {
@@ -258,6 +300,9 @@ struct Parser {
             Loc at = peek().loc;
             ++i;
             Type target = parseCType();
+            if (isPunct("*"))
+                failCode("E101", file, peek().loc, "a cast to a pointer type",
+                         "main-spec §4.6 accepts no pointer casts.", "remove the cast.");
             expectPunct(")", "to close the cast");
             Expr e;
             e.kind = Expr::Kind::Cast;
@@ -276,6 +321,17 @@ struct Parser {
             return e;
         }
         Expr e = parsePrimary();
+        while (isPunct("[")) {  // `a[i]`, `a[i][j]`
+            ++i;
+            Expr ix;
+            ix.kind = Expr::Kind::Index;
+            ix.loc = e.loc;
+            Expr idx = parseExpr();
+            expectPunct("]", "to close the index");
+            ix.kids.push_back(std::move(e));
+            ix.kids.push_back(std::move(idx));
+            e = std::move(ix);
+        }
         if (isPunct("++") || isPunct("--")) failIncDec();
         return e;
     }
@@ -307,6 +363,18 @@ struct Parser {
             e.kind = Expr::Kind::IntLit;
             e.text = t.text;
             e.loc = t.loc;
+            return e;
+        }
+        if (t.kind == Token::Kind::StringLit) {
+            Expr e;
+            e.kind = Expr::Kind::StringLit;
+            e.text = t.text;
+            e.loc = t.loc;
+            ++i;
+            while (peek().kind == Token::Kind::StringLit) {  // "a" "b" is one literal in C
+                e.text = e.text.substr(0, e.text.size() - 1) + peek().text.substr(1);
+                ++i;
+            }
             return e;
         }
         if (t.kind == Token::Kind::FloatLit || t.kind == Token::Kind::CharLit) {
@@ -387,15 +455,34 @@ struct Parser {
         return s;
     }
 
-    // `x = e;`  `x += e;`  `x++;`
+    // `x = e;`  `x += e;`  `x++;`  and the element forms `a[i][j] = e;` `a[i] += e;` `a[i]++;`
     Stmt parseAssignment() {
         Token name = toks[i++];
-        auto var = [&]() {
+        std::vector<Expr> indices;
+        while (isPunct("[")) {
+            ++i;
+            indices.push_back(parseExpr());
+            expectPunct("]", "to close the index");
+        }
+        auto var = [&]() {  // the left-hand side read back: `a`, or `a[i][j]`
             Expr v;
             v.kind = Expr::Kind::Ident;
             v.text = name.text;
             v.loc = name.loc;
+            for (const Expr& idx : indices) {
+                Expr ix;
+                ix.kind = Expr::Kind::Index;
+                ix.loc = name.loc;
+                ix.kids.push_back(std::move(v));
+                ix.kids.push_back(idx);
+                v = std::move(ix);
+            }
             return v;
+        };
+        auto assign = [&](Expr rhs) {
+            Stmt s = makeAssign(name, std::move(rhs));
+            s.indices = indices;
+            return s;
         };
         if (isPunct("++") || isPunct("--")) {
             std::string op = peek().text.substr(0, 1);
@@ -411,7 +498,7 @@ struct Parser {
             bin.loc = name.loc;
             bin.kids.push_back(var());
             bin.kids.push_back(std::move(one));
-            return makeAssign(name, std::move(bin));
+            return assign(std::move(bin));
         }
         std::string op = peek().text;
         ++i;
@@ -426,15 +513,45 @@ struct Parser {
             bin.kids.push_back(std::move(rhs));
             rhs = std::move(bin);
         }
-        return makeAssign(name, std::move(rhs));
+        return assign(std::move(rhs));
     }
 
+    static bool isAssignOp(const Token& t) {
+        if (t.kind != Token::Kind::Punct) return false;
+        const std::string& x = t.text;
+        return x == "=" || x == "+=" || x == "-=" || x == "*=" || x == "/=" || x == "%=" ||
+               x == "&=" || x == "|=" || x == "^=" || x == "<<=" || x == ">>=" || x == "++" || x == "--";
+    }
+
+    // `name` then an assignment operator, or `name[…]…[…]` then one.
     bool atAssignment() const {
-        if (peek().kind != Token::Kind::Ident || peek2().kind != Token::Kind::Punct) return false;
-        const std::string& t = peek2().text;
-        return t == "=" || t == "+=" || t == "-=" || t == "*=" || t == "/=" || t == "%=" ||
-               t == "&=" || t == "|=" || t == "^=" || t == "<<=" || t == ">>=" ||
-               t == "++" || t == "--";
+        if (peek().kind != Token::Kind::Ident) return false;
+        size_t j = i + 1;
+        while (toks[j].kind == Token::Kind::Punct && toks[j].text == "[") {
+            int depth = 0;
+            for (; toks[j].kind != Token::Kind::End; ++j) {
+                if (toks[j].kind == Token::Kind::Punct && toks[j].text == "[") ++depth;
+                if (toks[j].kind == Token::Kind::Punct && toks[j].text == "]" && --depth == 0) break;
+            }
+            if (toks[j].kind == Token::Kind::End) return false;
+            ++j;
+        }
+        return isAssignOp(toks[j]);
+    }
+
+    // `{1, 2, 3}` / `{{1, 2}, {3, 4}}`: the initialiser of an array local.
+    Expr parseInitList() {
+        Expr e;
+        e.kind = Expr::Kind::ArrayLit;
+        e.loc = peek().loc;
+        expectPunct("{", "to open the initialiser list");
+        while (!isPunct("}")) {
+            e.kids.push_back(isPunct("{") ? parseInitList() : parseExpr());
+            if (!isPunct(",")) break;
+            ++i;
+        }
+        expectPunct("}", "to close the initialiser list");
+        return e;
     }
 
     // The body of `if` / `else`: a braced block or one statement. `trailing`
@@ -568,23 +685,59 @@ struct Parser {
         if (w == "return") {
             ++i;
             s.kind = Stmt::Kind::Return;
+            if (isPunct(";")) {  // `return;` (a `void` function; check.cpp matches it to the signature)
+                s.noValue = true;
+                ++i;
+                return s;
+            }
             s.expr = parseExpr();
             expectPunct(";", "after the return expression");
             return s;
         }
         if (classifyTypeWord(w) == TypeWord::Supported) {
-            s.type = parseCType();
+            Loc typeAt = peek().loc;
+            Type base = parseCType();
+            int stars = parseStars();
             Token name = expectName("a variable name");
             checkName(name);
             s.kind = Stmt::Kind::Decl;
             s.name = name.text;
             s.loc = name.loc;
-            if (isPunct(";") || isPunct(","))
+            if (base.kind == Type::Kind::Unit && stars == 0)
+                fail(file, typeAt, "a variable of type `void`", "`void` has no values.", "use a real type.");
+            while (isPunct("[")) s.dims.push_back(parseArraySize());
+            s.type = declare(base, stars, s.dims.size(), typeAt, false);
+            if (isPunct(",") || (isPunct(";") && s.dims.empty()))
                 fail(file, name.loc, "local `" + name.text + "` has no initial value",
                      "Lean has no uninitialised variables, and picking a value would be guessing (D5).",
                      "give it an initial value, e.g. `= 0`.");
+            if (isPunct(";")) {  // `T a[N];` — arrays are filled with default values (§4.4)
+                if (s.type.kind != Type::Kind::Array)
+                    fail(file, name.loc, "local `" + name.text + "` has no initial value",
+                         "Lean strings are immutable, so an empty `char s[N]` could never be filled.",
+                         "write the string: `char s[] = \"…\";`.");
+                for (long long d : s.dims)
+                    if (d < 0)
+                        fail(file, name.loc, "the size of the array `" + name.text + "` is missing",
+                             "with no initialiser there is nothing to take the size from.",
+                             "write the size: `" + name.text + "[N]`.");
+                s.noInit = true;
+                ++i;
+                return s;
+            }
             expectPunct("=", "after the name of the local `" + name.text + "`");
-            s.expr = parseExpr();
+            if (s.type.kind == Type::Kind::Array) {
+                if (!isPunct("{"))
+                    failHere("an array is initialised with `{ … }`",
+                             "C cannot copy an array with `=`.", "write the initialiser list.");
+                s.expr = parseInitList();
+            } else {
+                if (isPunct("{") && s.type.kind == Type::Kind::String)
+                    failHere("a `char` array is a `String` in Lean",
+                             "main-spec §4.3 maps `char s[]` to an immutable `String`, not to an array of characters.",
+                             "initialise it with a string literal, or use `uint8_t a[N] = { … }` for bytes.");
+                s.expr = parseExpr();
+            }
             expectPunct(";", "after the declaration of `" + name.text + "`");
             return s;
         }
@@ -602,11 +755,16 @@ struct Parser {
                      "write the computation without loops for now.");
         if (atTypeWord()) parseCType();  // a type clean does not translate: refused with the reason
         if (atAssignment()) return parseAssignment();
-        if (peek2().kind == Token::Kind::Punct && peek2().text == "(")
-            failHere("call statement `" + w + "(…);` has no effect here",
-                     "functions are pure in Lean; a discarded result does nothing "
-                     "(effects arrive with `printf` and IO).",
-                     "use the value: `T r = " + w + "(…);`.");
+        if (peek2().kind == Token::Kind::Punct && peek2().text == "(") {  // `f(args);` (check.cpp: void only)
+            s.kind = Stmt::Kind::CallStmt;
+            s.expr = parseExpr();
+            if (s.expr.kind != Expr::Kind::Call)
+                fail(file, s.expr.loc, "an expression statement has no effect",
+                     "functions are pure in Lean, so only a call to a `void` function can stand alone.",
+                     "use the value, e.g. assign it to a local.");
+            expectPunct(";", "after the call");
+            return s;
+        }
         failHere("expected a statement, found " + describe(peek()), kSliceWhy,
                  "see spec/impl-spec.md for the statements that are translated.");
     }
@@ -657,16 +815,41 @@ struct Parser {
             return params;  // the `)` stays for the caller
         }
         if (isPunct(")")) return params;  // `f()`
+        std::vector<std::pair<size_t, Loc>> pointers;  // `T *a` parameters: they need a length after them
         while (true) {
-            Type ty = parseCType();
+            Loc at = peek().loc;
+            Type base = parseCType();
+            int stars = parseStars();
             Token name = expectName("a parameter name");
             checkName(name);
+            if (base.kind == Type::Kind::Unit && stars == 0)
+                fail(file, at, "a parameter of type `void`", "`void` has no values.", "use a real type.");
+            size_t brackets = 0;
+            while (isPunct("[")) {
+                parseArraySize();  // the size is not part of the type (§4.4)
+                ++brackets;
+            }
+            Type ty = declare(base, stars, brackets, at, true);
+            if (stars == 1 && ty.kind == Type::Kind::Array) pointers.emplace_back(params.size(), at);
             params.emplace_back(ty, name.text);
             if (isPunct(",")) {
                 ++i;
                 continue;
             }
             break;
+        }
+        // §4.6: pointer decay is accepted only as `T *a, size_t n`.
+        for (const auto& pr : pointers) {
+            bool ok = pr.first + 1 < params.size();
+            if (ok) {
+                const Type& next = params[pr.first + 1].first;
+                ok = next.kind == Type::Kind::Nat || next.kind == Type::Kind::Int ||
+                     next.kind == Type::Kind::UInt || next.kind == Type::Kind::SInt;
+            }
+            if (!ok)
+                failCode("E101", file, pr.second, "pointer parameter `" + params[pr.first].second + "` has no length",
+                         "main-spec §4.6 accepts `T *a` only together with a length parameter right after it.",
+                         "write `T a[]`, or add `size_t n` after it.");
         }
         return params;
     }
@@ -759,7 +942,9 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             p.failHere("expected a declaration, found " + describe(p.peek()), kSliceWhy,
                        "files contain functions; see spec/impl-spec.md.");
         int defLine = p.peek().loc.line;
+        Loc retAt = p.peek().loc;
         Type retType = p.parseCType();
+        retType = p.declare(retType, p.parseStars(), 0, retAt, false);
         Token name = p.expectName("a function name");
         p.checkName(name);
         p.expectPunct("(", "to open the parameter list of `" + name.text + "`");

@@ -248,7 +248,7 @@ Operators keep their Lean meaning (D4): the table lists the Lean spelling, not a
 | C                                     | Lean on `Int`/`Nat`                  | Lean on `BitVec N` / `UIntN` / `IntN` | Notes                                                                       |
 | ------------------------------------- | ------------------------------------ | ------------------------------------- | --------------------------------------------------------------------------- |
 | `+ - *`                               | same                                 | same (wrapping)                       |                                                                             |
-| `/` , `%`                             | `/` , `%`                            | `/` , `%` (unsigned on `BitVec`)      | Lean's own semantics; division by zero is `0` (lint W005).                  |
+| `/` , `%`                             | `/` , `%`                            | `/` , `%` (unsigned on `BitVec`)      | Lean's own semantics (**D18**); division by zero is `0` (lint W005); on `Int` also lint W014 (negative operands). |
 | `== != < <= > >=`                     | `== != < <= > >=` (via `decide`)     | same                                  | On `BitVec` the ordering is unsigned; see §5.4 for signed.                  |
 | `&& \|\| !`                           | same                                 | same                                  |                                                                             |
 | `& \| ^ ~`                            | `&&&` `\|\|\|` `^^^` — on `Nat` only | `&&&` `\|\|\|` `^^^` `~~~`            | Bitwise on `Int` is ⛔ (**E303**); use `uintN_t` or `bv`.                    |
@@ -273,6 +273,8 @@ C allows any scalar in a condition. The tool inserts the explicit test:
 ### 5.3 Conversions and casts ✅
 
 Lean does not convert implicitly, so a cast written in C, or a mix of types in one expression, becomes an explicit Lean conversion chosen from the *types as written*. C's *usual arithmetic conversions* are not replicated.
+
+**Mixed operands (D19).** When the two operands of an operator (or an assignment, argument or `return`) have different types, the tool inserts the conversion from the table below. For an operator, the operand of lower **rank** is converted to the type of the higher one: `Nat < Int < intN_t/uintN_t < bv(N) < Float32 < Float`. Two fixed widths: the wider wins, and at equal width the unsigned one. A literal takes the other operand's type. `char` counts as its code (`Nat`, §4.2) in arithmetic, and two `char`s compared stay `Char`. In a shift the result has the left operand's type and the count is converted to it. Not converted (errors): `bv(N)` with `bv(M)` (**E301**), and `bool`, `String` and arrays with anything else — there is no row for them.
 
 | From → to                     | Lean                                           | Lint                         |
 | ----------------------------- | ---------------------------------------------- | ---------------------------- |
@@ -775,7 +777,7 @@ Transcendental functions are opaque to Lean's logic and do not reduce in the ker
         fix:  <concrete rewrite>
 ```
 
-Errors (E) and hints (H) are always shown. **Lints (W001–W013) are off by default** and enabled with `--lint=c-semantics` (W001–W011) or by the feature that triggers them (W012, W013). Each lint is reported once per kind per file.
+Errors (E) and hints (H) are always shown. **Lints (W001–W014) are off by default** and enabled with `--lint=c-semantics` (W001–W011, W014) or by the feature that triggers them (W012, W013). Each lint is reported once per kind per file.
 
 ### 13.2 Catalogue
 

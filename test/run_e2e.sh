@@ -8,6 +8,10 @@
 #      the combined file with `lean` — skipped, with a notice, if absent.
 # For every test/cases-should-fail/*.c:
 #   expect the translator to exit 1 with a diagnostic on stderr.
+# For every test/cases-lint/*.c:
+#   translate with --lint=c-semantics; stderr must equal <name>.expected.lint
+#   (decision D18), and the .lean output must be identical to a run without
+#   the flag: lints only report, they never change the translation.
 # For every test/cases-lean-rejects/*.c:
 #   the translator must SUCCEED and `lean` must then REJECT the output (code
 #   whose legality only Lean can judge, e.g. unproven termination).
@@ -19,6 +23,7 @@ bin="$root/release/clean"
 cases="$root/test/cases"
 fails="$root/test/cases-should-fail"
 rejects="$root/test/cases-lean-rejects"
+lints="$root/test/cases-lint"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -40,6 +45,11 @@ for src in "$cases"/*.c; do
     if ! "$bin" "$src" -o "$tmp/$name.lean" > "$tmp/$name.log" 2>&1; then
         echo "FAIL $name: translator exited with an error"
         sed 's/^/    /' "$tmp/$name.log"
+        fail=$((fail + 1))
+        continue
+    fi
+    if grep -q '^W[0-9]' "$tmp/$name.log"; then
+        echo "FAIL $name: a lint (W…) was printed without --lint=c-semantics"
         fail=$((fail + 1))
         continue
     fi
@@ -78,6 +88,32 @@ for src in "$fails"/*.c; do
     fi
     echo "PASS $name (rejected as expected)"
     sed 's/^/    /' "$tmp/$name.log" | head -4
+    pass=$((pass + 1))
+done
+
+for src in "$lints"/*.c; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src" .c)"
+
+    if ! "$bin" "$src" -o "$tmp/$name.lint.lean" --lint=c-semantics > /dev/null 2> "$tmp/$name.lint"; then
+        echo "FAIL $name: translator exited with an error under --lint=c-semantics"
+        sed 's/^/    /' "$tmp/$name.lint"
+        fail=$((fail + 1))
+        continue
+    fi
+    if ! diff -u "$lints/$name.expected.lint" "$tmp/$name.lint" > "$tmp/$name.diff" 2>&1; then
+        echo "FAIL $name: lint report differs from $name.expected.lint"
+        sed 's/^/    /' "$tmp/$name.diff"
+        fail=$((fail + 1))
+        continue
+    fi
+    "$bin" "$src" -o "$tmp/$name.plain.lean" > /dev/null 2>&1
+    if ! cmp -s "$tmp/$name.lint.lean" "$tmp/$name.plain.lean"; then
+        echo "FAIL $name: --lint=c-semantics changed the generated Lean"
+        fail=$((fail + 1))
+        continue
+    fi
+    echo "PASS $name (lint report matches, translation unchanged)"
     pass=$((pass + 1))
 done
 

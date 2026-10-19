@@ -28,11 +28,15 @@ struct Type {
         Float64,       // C `double`, `long double`                         → `Float`
         Bool,          // C `bool`, `_Bool`                                 → `Bool`
         Char,          // C `char`                                          → `Char`
+        String,        // C `char *`, `char s[]`, string literals          → `String`
+        Array,         // C `T a[N]`, `T *a`, `T a[M][N]`                   → `Array T`
+        Unit,          // C `void` (return type only)                       → `Unit`
     };
     Kind kind = Kind::Int;
-    int width = 0;  // SInt/UInt: 8 16 32 64; BitVec: N; otherwise 0
+    int width = 0;            // SInt/UInt: 8 16 32 64; BitVec: N; otherwise 0
+    std::vector<Type> args;   // Array: the element type, as args[0]
 
-    bool operator==(const Type& o) const { return kind == o.kind && width == o.width; }
+    bool operator==(const Type& o) const { return kind == o.kind && width == o.width && args == o.args; }
     bool operator!=(const Type& o) const { return !(*this == o); }
     static Type of(Kind k, int w = 0) {
         Type t;
@@ -40,10 +44,19 @@ struct Type {
         t.width = w;
         return t;
     }
+    static Type arrayOf(const Type& elem) {
+        Type t;
+        t.kind = Kind::Array;
+        t.args.push_back(elem);
+        return t;
+    }
+    const Type& elem() const { return args[0]; }  // Array only
 };
 
 bool isLiteral(Type t);   // Literal or FloatLiteral
 bool isFloat(Type t);     // Float32 / Float64 (not the literal)
+bool isArray(Type t);
+bool isString(Type t);
 
 // The Lean spelling: `Int`, `UInt8`, `BitVec 8`, `Float`, `Bool`, …
 std::string leanName(Type t);
@@ -75,15 +88,29 @@ TypeResolution makeBitVec(long long width);  // E302 if it is not a usable const
 // True for the two spellings of the bit-vector type (`bv`, `_BitVec`).
 bool isBitVecWord(const std::string& word);
 
+// A declarator is what follows the type words: `*` and `[…]`. Applies them:
+//   `char *s`, `char s[]`            → String
+//   `T *a` (parameter), `T a[N]`, `T a[M][N]` → Array T / Array (Array T)
+// `star` = number of `*`, `brackets` = number of `[…]`. Pointer forms outside
+// those (§4.6) are E101.
+TypeResolution applyDeclarator(Type base, int star, int brackets, bool isParam);
+
 // "`int` or `unsigned`"-style hint for messages, so they never go stale.
 std::string supportedTypesHint();
 
 // ---- expressions ---------------------------------------------------------------
 
-// The common type of two operands (`a + b`, `a < b`, …).
-//   Literal adapts to the other side; `Int` with `Nat` gives `Int` (Lean
-//   coerces, D4); anything else must match exactly, or the operands are
-//   refused: Lean has no implicit conversions between the other types.
+// The common type of two operands (`a + b`, `a < b`, …) — decision D19:
+// a mix of types is converted, the conversion chosen from the types as
+// written (§5.3), C's usual arithmetic conversions are NOT replicated.
+//   * a literal takes the other side's type;
+//   * otherwise the higher rank wins:
+//       Nat < Int < intN_t/uintN_t < bv(N) < float < double
+//     (two fixed widths: the wider one; same width: the unsigned one);
+//   * `char` counts as its code (`Nat`, §4.2) unless two chars are compared;
+//   * refused: `bv(N)` with `bv(M)` (E301), and `bool`, `String`, arrays with
+//     anything else (there is no conversion row for them).
+// The caller converts each operand whose type differs from the result.
 struct Unified {
     bool ok = false;
     Type type;
@@ -92,7 +119,7 @@ struct Unified {
     std::string why;
     std::string fix;
 };
-Unified unify(Type a, Type b);
+Unified unify(Type a, Type b, bool comparison = false);
 
 // Is the C operator (`+ - * / % & | ^ << >>`, unary `-` `~`) defined on this type?
 struct OpRule {
@@ -120,6 +147,14 @@ Flow flowKind(Type from, Type to);
 // parenthesised) from `from` to `to`. Empty on failure, with `why`/`fix` set.
 // Used for explicit casts `(T)e` and for the implicit conversions above.
 std::string convert(Type from, Type to, const std::string& x, std::string* why, std::string* fix);
+
+// Which comparison operators exist on this type (`bool` and `String` only
+// have `==`/`!=`; arrays and `void` have none).
+OpRule checkCompare(const std::string& op, Type t);
+
+// The Lean value C would have for "all zero bits" of this type, used to pad
+// and default arrays: `0`, `0#8`, `0.0`, `false`, `'\x00'`, `""`.
+std::string zeroValue(Type t);
 
 // ---- tests -----------------------------------------------------------------------
 

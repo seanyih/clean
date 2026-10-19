@@ -12,7 +12,7 @@ def big (a b c : Nat) : Nat := a + b + c
 -- c: int_family.c:12
 -- `Int` and `Nat` mixed in one expression: Lean coerces (D4), the result is `Int`
 def mixed (a : Int) (b : Nat) : Int := Id.run do
-  let r : Int := a + b
+  let r : Int := a + (↑b : Int)
   if b ≠ 0 then
     return r
   return 0

@@ -60,7 +60,7 @@ std::string leanOp(const std::string& op) {
     return op;
 }
 
-Type cmpType(const Expr& e) { return unify(e.kids[0].type, e.kids[1].type).type; }
+Type cmpType(const Expr& e) { return unify(e.kids[0].type, e.kids[1].type, true).type; }
 
 // Level of the Lean text of `e` when used as a value (a `bool`-valued test
 // included). 100 = an atom that needs no parentheses anywhere.
@@ -103,10 +103,20 @@ void emitExpr(const Expr& e, std::string& out) {
     case Expr::Kind::IntLit:
     case Expr::Kind::FloatLit:
     case Expr::Kind::CharLit:
+    case Expr::Kind::StringLit:
     case Expr::Kind::BoolLit:
     case Expr::Kind::Ident:
         out += e.text;
         return;
+    case Expr::Kind::Index:  // `a[i]!`, and on a string `s.toList[i]!` (main-spec §4.3, §4.4)
+        emitAtom(e.kids[0], out);
+        if (e.kids[0].type.kind == Type::Kind::String) out += ".toList";
+        out += '[';
+        emitExpr(e.kids[1], out);
+        out += "]!";
+        return;
+    case Expr::Kind::ArrayLit:
+        return;  // printed by emitArrayInit
     case Expr::Kind::BvLit:
         out += e.text + "#" + std::to_string(e.type.width);
         return;
@@ -300,6 +310,57 @@ void emitSwitch(const Stmt& s, int level, std::string& out) {
     }
 }
 
+// ---- arrays ---------------------------------------------------------------
+
+// `x` as a function argument: parenthesised when it has a space.
+std::string arg(const std::string& x) { return x.find(' ') == std::string::npos ? x : "(" + x + ")"; }
+
+// "All zero" of `t`, an array level deeper when `t` is an array (sizes from `dims`).
+std::string zeroOf(Type t, const std::vector<long long>& dims, size_t depth) {
+    if (t.kind != Type::Kind::Array) return zeroValue(t);
+    return "Array.replicate " + std::to_string(dims[depth]) + " " + arg(zeroOf(t.elem(), dims, depth + 1));
+}
+
+std::string arrayLit(const Expr& lit, Type arr, const std::vector<long long>& dims, size_t depth) {
+    const long long n = dims[depth];
+    const long long k = (long long)lit.kids.size();
+    const Type elem = arr.elem();
+    std::vector<std::string> parts;
+    for (const Expr& kid : lit.kids) {
+        std::string t;
+        if (elem.kind == Type::Kind::Array) t = arrayLit(kid, elem, dims, depth + 1);
+        else emitExpr(kid, t);
+        parts.push_back(t);
+    }
+    const std::string zero = zeroOf(elem, dims, depth + 1);
+    const std::string fill = "Array.replicate " + std::to_string(n) + " " + arg(zero);
+    if (k == 0 || (k == 1 && parts[0] == zero && n > 1)) return fill;  // `{0}` → replicate (§4.4)
+    std::string list = "#[";
+    for (size_t i = 0; i < parts.size(); ++i) list += (i ? ", " : "") + parts[i];
+    list += "]";
+    if (k == n) return list;
+    // C zero-fills the rest of a short list.
+    return list + " ++ Array.replicate " + std::to_string(n - k) + " " + arg(zero);
+}
+
+// The initial value of an array local: its list, or default values (§4.4).
+std::string arrayInit(const Stmt& s) {
+    if (!s.noInit) return arrayLit(s.expr, s.type, s.dims, 0);
+    std::string out = "default";
+    for (size_t d = s.dims.size(); d-- > 0;) out = "Array.replicate " + std::to_string(s.dims[d]) + " " + arg(out);
+    return out;
+}
+
+// `a.set! i v`, or for a nested element `a.set! i (a[i]!.set! j v)`.
+std::string setElement(const std::string& base, const std::vector<Expr>& idx, size_t k, const std::string& v) {
+    std::string at;
+    emitAtom(idx[k], at);
+    if (k + 1 == idx.size()) return base + ".set! " + at + " " + v;
+    std::string raw;
+    emitExpr(idx[k], raw);
+    return base + ".set! " + at + " (" + setElement(base + "[" + raw + "]!", idx, k + 1, v) + ")";
+}
+
 // The statements themselves, no `do`-sequence housekeeping.
 void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
     for (const Stmt& s : list) {
@@ -307,17 +368,30 @@ void emitList(const std::vector<Stmt>& list, int level, std::string& out) {
         switch (s.kind) {
         case Stmt::Kind::Decl:
             out += pad(level) + (s.mut ? "let mut " : "let ") + s.name + " : " + leanName(s.type) + " := ";
-            emitExpr(s.expr, out);
+            if (s.type.kind == Type::Kind::Array) out += arrayInit(s);
+            else emitExpr(s.expr, out);
             out += "\n";
             break;
         case Stmt::Kind::Assign:
             out += pad(level) + s.name + " := ";
+            if (s.indices.empty()) {
+                emitExpr(s.expr, out);
+            } else {  // `a[i][j] = v;` → `a.set! i (a[i]!.set! j v)` (§4.4)
+                std::string v;
+                emitAtom(s.expr, v);
+                out += setElement(s.name, s.indices, 0, v);
+            }
+            out += "\n";
+            break;
+        case Stmt::Kind::CallStmt:  // a `void` call: pure, so it can only be run for show
+            out += pad(level) + "let _ := ";
             emitExpr(s.expr, out);
             out += "\n";
             break;
         case Stmt::Kind::Return:
             out += pad(level) + "return ";
-            emitExpr(s.expr, out);
+            if (s.noValue) out += "()";
+            else emitExpr(s.expr, out);
             out += "\n";
             break;
         case Stmt::Kind::If:
@@ -343,7 +417,8 @@ void emitStmts(const std::vector<Stmt>& list, int level, std::string& out,
     emitList(list, level, out);
     if (trailing) emitComments(*trailing, pad(level), out);
     // A Lean `do` sequence cannot end in `let`, and cannot be empty.
-    if (list.empty() || list.back().kind == Stmt::Kind::Decl) out += pad(level) + "pure ()\n";
+    if (list.empty() || list.back().kind == Stmt::Kind::Decl || list.back().kind == Stmt::Kind::CallStmt)
+        out += pad(level) + "pure ()\n";
 }
 
 // ---- functions ------------------------------------------------------------
@@ -381,7 +456,8 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
     }
     out += " : " + leanName(f.retType) + " := ";
     if (oneReturn) {
-        emitExpr(f.body[0].expr, out);
+        if (f.body[0].noValue) out += "()";
+        else emitExpr(f.body[0].expr, out);
         out += "\n";
         emitComments(f.bodyTrailing, "", out);  // no `do` block to hold them
         return;

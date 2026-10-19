@@ -1,0 +1,15 @@
+#guard greeting = "hello\n"
+#guard title = "clean"
+#guard first "xyz" = 'x'
+#guard third "abc" = 'c'
+#guard isHello "hello" = 1
+#guard isHello "world" = 0
+#guard nonEmpty "" = 0
+#guard nonEmpty "a" = 1
+#guard same "a" "a" = true
+#guard same "a" "b" = false
+#guard pick true "a" "b" = "a"
+#guard pick false "a" "b" = "b"
+#guard joined = "abcd"
+#guard quoted = "say \"hi\"\tA"
+#guard viaLocal = 1

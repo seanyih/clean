@@ -1,0 +1,27 @@
+W001  c_semantics.c:9:1  `int divide(…)` is an `int`: Lean's `Int` is unbounded  (+5 more in this file)
+      why:  C's `int` wraps at 32 bits; clean maps the `int` family to `Int` and emulates nothing (D4).
+      fix:  use `int32_t` (or another `intN_t`) where a fixed width is meant.
+W005  c_semantics.c:9:35  `/` by a value that may be zero
+      why:  in Lean `x / 0` is 0 and `x % 0` is `x`; in C it is undefined.
+      fix:  guard the divisor.
+W014  c_semantics.c:9:35  `/` on `int` rounds differently from C for negative operands  (+1 more in this file)
+      why:  C truncates toward zero (`-7 / 2 = -3`, `-7 % 2 = -1`); Lean's `Int` division is Euclidean (`-7 / 2 = -4`, `-7 % 2 = 1`) and clean keeps Lean's (D18).
+      fix:  make sure both operands are non-negative, or use `unsigned`; C's truncating division is not emitted.
+W002  c_semantics.c:12:47  `-` on `unsigned` stops at 0
+      why:  Lean's `Nat` subtraction is 0 when the result would be negative; C wraps around.
+      fix:  guard it with a comparison, or use `int` / `uint32_t` (the `--unsigned=int` option of main-spec §4.1 is not built yet).
+W008  c_semantics.c:15:45  `+` on `uint8_t` is done in 8 bits
+      why:  C promotes it to `int` first; Lean computes in the exact width and wraps (§5.3).
+      fix:  cast to a wider type first if C's promotion is meant, e.g. `(uint32_t)a + b`.
+W009  c_semantics.c:18:35  a signed value is converted to `unsigned`; negatives become 0
+      why:  Lean's `Int.toNat` clamps negative numbers to 0; C wraps modulo 2^N.
+      fix:  make sure the value is non-negative, or keep it signed.
+W007  c_semantics.c:21:32  a `char` is converted to an integer
+      why:  Lean's `Char` is not a number; clean goes through `Nat` (`c.toNat`, `Char.ofNat n`), as main-spec §4.2 describes.
+      fix:  use `uint8_t` for byte values.
+W010  c_semantics.c:24:36  `a[i]` panics when the index is out of range
+      why:  it is `a[i]!`, which panics at run time.
+      fix:  guard the index with a comparison (the `--index=proof` option of main-spec §10 is not built yet).
+W011  c_semantics.c:25:38  indexing a string is O(n)
+      why:  `s.toList[i]!` builds the whole character list on every access.
+      fix:  avoid indexing in loops; use a `uint8_t` array for byte buffers.

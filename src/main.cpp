@@ -1,10 +1,11 @@
 // main.cpp — command line entry: wire the layers together.
 //
-// Layer: driver (lex → parse → check → sort → emit). Input: `clean <input.c> [-o <output.lean>]` (argv).
+// Layer: driver (lex → parse → check → [lint] → sort → emit). Input: `clean <input.c> [-o <output.lean>] [--lint=c-semantics]` (argv).
 // Output: one .lean file (default: the input path with `.c` → `.lean`), a
 // one-line summary on stdout; diagnostics go to stderr with exit 1 (see
 // diag.h), usage errors exit 2.
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -15,13 +16,14 @@
 #include "check.h"
 #include "emitter.h"
 #include "lexer.h"
+#include "lint.h"
 #include "parser.h"
 #include "toposort.h"
 
 namespace {
 
 void usage(const char* prog) {
-    std::cerr << "usage: " << prog << " <input.c> [-o <output.lean>]\n";
+    std::cerr << "usage: " << prog << " <input.c> [-o <output.lean>] [--lint=c-semantics]\n";
 }
 
 std::string baseName(const std::string& path) {
@@ -61,9 +63,15 @@ void writeFile(const std::string& path, const std::string& content) {
 
 int main(int argc, char** argv) {
     std::string in, out;
+    bool lintCSemantics = false;  // --lint=c-semantics: report where C would behave differently (W001–W014)
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "-o") {
+        if (arg == "--lint=c-semantics") {
+            lintCSemantics = true;
+        } else if (arg.rfind("--lint", 0) == 0) {
+            std::cerr << "clean: unknown option '" << arg << "' (the only lint set is --lint=c-semantics)\n";
+            return 2;
+        } else if (arg == "-o") {
             if (i + 1 >= argc) {
                 usage(argv[0]);
                 return 2;
@@ -89,11 +97,18 @@ int main(int argc, char** argv) {
         const std::string source = readFile(in);
         LexResult lexed = lex(source, baseName(in));
         TranslationUnit unit = parse(lexed.tokens, lexed.definedNames, lexed.definedValues, baseName(in));
+        unit.pragmas = lexed.pragmas;
         check(unit);
+        if (lintCSemantics) lint(unit);  // before sorting: "first place" means first in the C file
         sortDefinitions(unit);
         writeFile(out, emit(unit));
         std::cout << "clean: wrote " << out << " (" << unit.functions.size()
                   << " definition(s))\n";
+        // Hints (H…) always, lints (W…) when asked; they never change the exit code.
+        std::stable_sort(unit.notes.begin(), unit.notes.end(), [](const DiagError& a, const DiagError& b) {
+            return a.loc().line != b.loc().line ? a.loc().line < b.loc().line : a.loc().col < b.loc().col;
+        });
+        for (const DiagError& n : unit.notes) std::cerr << n.render();
         return 0;
     } catch (const DiagError& d) {
         std::cerr << d.render();
