@@ -32,7 +32,7 @@ const std::set<std::string> kLeanKeywords = {
     "while", "for", "in", "break", "continue", "sorry", "by", "from", "have",
     "show", "Type", "Prop", "Unit", "Nat", "Int", "Bool", "String", "Char",
     "Float", "Float32", "BitVec", "Array", "List", "Option", "true", "false", "decide",
-    "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+    "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64", "use",
 };
 
 // Statement keywords that come in a later slice.
