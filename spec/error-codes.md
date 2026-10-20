@@ -15,12 +15,12 @@ Messages render exactly as main-spec §13.1 prescribes (implemented in
 ```
 
 Errors (E) and hints (H) are always shown. Lints (W) are off by default and
-come with `--lint=c-semantics` (W001–W011 and W014); W012/W013 come with the
+come with `--lint=c-semantics` (W001–W011 and W014, and W006); W012/W013 come with the
 features that trigger them. Each lint is reported once per kind per file: the
 first place, plus a count of the others. A lint never changes the translation
 or the exit code (decision D18; `src/lint.cpp`). Not built because their
 feature does not exist yet: W003 (`long double`), W004 (uninitialised locals
-are still refused), W006 (`printf`), W012, W013.
+are still refused), W012, W013.
 
 **E000 — the build's placeholder, not a catalogue code.** Every refusal that
 has no permanent number yet is reported as E000. Two flavours:
@@ -61,7 +61,7 @@ Status legend: ✅ emitted today (file that throws it) · ⚠️ partial ·
 | E202 | error (synth) | loop not reducible to range-for                                                                     | constant-bound `for`                                                       | ❌ no loops yet (`for`/`while` are E000 refusals)                                                     |
 | E203 | error (synth) | float types                                                                                          | fixed-point with `bv(N)`                                                   | ❌ no `synth` profile (float types are translated now) |
 | E204 | error (synth) | `String`/`char *`                                                                                    | `bv(8)` arrays                                                             | ❌ no `synth` profile; no strings                                                                    |
-| E205 | error (synth) | I/O (`printf`, …)                                                                                    | mark function `NOSYNTH`                                                   | ❌ no `synth` profile; no I/O translation                                                             |
+| E205 | error (synth) | I/O (`printf`, …)                                                                                    | mark function `NOSYNTH`                                                   | ❌ no `synth` profile (I/O itself translates: `IO`, §8) |
 | E208 | error (synth) | unbounded `int`/`unsigned`                                                                           | `intN_t`/`uintN_t`/`bv(N)`                                                 | ❌ no `synth` profile                                                                                  |
 | E301 | error         | bit-width mismatch                                                                                   | `bv_zext`, `bv_sext`, `bv_ext`                                             | ✅ types.cpp `unify` / check.cpp `valueAs` (`bv(8)` with `bv(4)`); the §5.4 helpers it suggests are not built |
 | E302 | error         | non-constant `bv` width                                                                              | use a constant or `#define`                                                | ⚠️ parser.cpp `parseWidthValue`: literal or `#define NAME <integer>` ✅; other constant expressions are refused with this code |
@@ -77,7 +77,7 @@ Status legend: ✅ emitted today (file that throws it) · ⚠️ partial ·
 | W003 | lint          | `long double` → `Float`                                                                              | —                                                                          | ❌ no lint pass (`long double` → `Float` is translated silently) |
 | W004 | lint          | uninitialised variable zero-initialised                                                              | initialise                                                                 | ❌ today `int x;` is refused outright (E000, "picking a value would be guessing"); zero-init + W004 arrives with that slice |
 | W005 | lint          | division by zero is `0`                                                                              | guard                                                                      | ✅ lint.cpp |
-| W006 | lint          | `printf` width/precision ignored                                                                     | —                                                                          | ❌ no `printf` translation yet                                                                        |
+| W006 | lint          | `printf` width/precision ignored                                                                     | —                                                                          | ✅ lint.cpp: any width/flag/precision, and every `%f %g %e` (Lean's float text differs) |
 | W007 | lint          | `char` ↔ integer conversion                                                                           | `uint8_t`                                                                  | ✅ lint.cpp (casts between `char` and integers, inserted or written) |
 | W008 | lint          | exact-width arithmetic, no `int` promotion                                                           | —                                                                          | ✅ lint.cpp (`intN_t`/`uintN_t` narrower than 32 bits) |
 | W009 | lint          | `Int.toNat` clamps negative values                                                                    | —                                                                          | ✅ lint.cpp (`Int`/`intN_t` → `Nat`/`char`, inserted or written; also an `int` used as an index) |

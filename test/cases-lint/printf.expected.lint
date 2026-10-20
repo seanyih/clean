@@ -1,0 +1,6 @@
+W001  printf.c:5:1  `int a` is an `int`: Lean's `Int` is unbounded  (+1 more in this file)
+      why:  C's `int` wraps at 32 bits; clean maps the `int` family to `Int` and emulates nothing (D4).
+      fix:  use `int32_t` (or another `intN_t`) where a fixed width is meant.
+W006  printf.c:10:5  `printf` formatting is simplified  (+1 more in this file)
+      why:  width, flags and precision are ignored, and floats print the way Lean prints them (`%f` is not C's six decimals).
+      fix:  format the value yourself if the exact text matters (padding helpers are 🟡 in main-spec §8.1).

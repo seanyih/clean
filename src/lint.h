@@ -14,9 +14,10 @@
 //   W005  division by zero is 0                      W010  `a[i]!` can panic
 //   W007  `char` ↔ integer conversion                W011  string indexing is O(n)
 //   W014  `/` `%` on `Int` round differently from C when an operand is negative (D18)
+//   W006  `printf` width / flags / precision are ignored; `%f` is Lean's float text
 //
-// W003, W004, W006 need features that do not exist yet (`long double` is
-// spelled away by the parser, no uninitialised locals, no `printf`).
+// W003, W004 need features that do not exist yet (`long double` is spelled
+// away by the parser, no uninitialised locals).
 
 #pragma once
 

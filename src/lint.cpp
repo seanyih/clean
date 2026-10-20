@@ -151,6 +151,16 @@ struct Linter {
                        "(reading `a[i]!` panics instead).",
                        "guard the index with a comparison "
                        "(the `--index=proof` option of main-spec §10 is not built yet).");
+            if (s.kind == Stmt::Kind::Print) {
+                bool simplified = false;
+                for (const FmtPiece& p : s.pieces) simplified = simplified || p.padded || p.conv == 'f';
+                if (simplified)
+                    report("W006", s.loc, "`printf` formatting is simplified",
+                           "width, flags and precision are ignored, and floats print the way Lean "
+                           "prints them (`%f` is not C's six decimals).",
+                           "format the value yourself if the exact text matters "
+                           "(padding helpers are 🟡 in main-spec §8.1).");
+            }
             stmts(s.body);
             stmts(s.elseBody);
             for (const Case& c : s.cases) stmts(c.body);
@@ -169,6 +179,8 @@ void lint(TranslationUnit& unit) {
         L.stmts(f.body);
         forEachExpr(f.body, [&](const Expr& e) { L.expr(e); });
     }
+    L.stmts(unit.scripts);  // file-scope printf (§8.2)
+    forEachExpr(unit.scripts, [&](const Expr& e) { L.expr(e); });
     for (auto& entry : L.hits) {
         Hit& h = entry.second;
         if (h.more == 0) {

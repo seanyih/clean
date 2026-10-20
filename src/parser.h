@@ -2,9 +2,10 @@
 // honest (D5/D8: reject, never guess).
 //
 // Layer: front-end. Input: tokens and the #define'd names. Output: a
-// TranslationUnit (syntax only: whether names exist etc. is check.h). Grammar:
+// TranslationUnit (syntax only: whether names exist etc. is check.h). The format of a
+// printf is cut up by format.h. Grammar:
 //
-//   file      :=  ( comment | ';' | prototype | function )*  EOF
+//   file      :=  ( comment | ';' | prototype | function | print )*  EOF
 //   prototype :=  type IDENT '(' params ')' ';'
 //   function  :=  attr* type IDENT '(' params ')' block
 //   attr      :=  '[[' 'lean' '::' 'partial' ']]'
@@ -17,7 +18,11 @@
 //              |  IDENT ('++' | '--') ';'
 //              |  'if' '(' expr ')' body [ 'else' body ]
 //              |  'switch' '(' expr ')' '{' group* '}'
+//              |  print
 //              |  'return' expr ';'  |  'break' ';'  |  block  |  ';'
+//   print     :=  'printf' '(' STRINGLIT (',' expr)* ')' ';'     (also at file scope: §8.2)
+//              |  'fprintf' '(' ('stderr'|'stdout') ',' STRINGLIT (',' expr)* ')' ';'
+//              |  ('puts' | 'putchar') '(' expr ')' ';'
 //   body      :=  block | stmt
 //   group     :=  ( 'case' ['-'] INTLIT ':' | 'default' ':' )+ stmt*
 //   expr      :=  C precedence:  ||  &&  |  ^  &  == !=  < <= > >=  << >>  + -  * / %

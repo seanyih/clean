@@ -3,12 +3,14 @@
 Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
-Current state: **slices 0–7** — functions over every type of main-spec §4.1
+Current state: **slices 0–8** — functions over every type of main-spec §4.1
 and §4.3–4.4 except structs/enums/typedefs: integers, `intN_t`/`uintN_t`,
 `bool`, `char`, `bv(N)`, `float`/`double`, `void`, strings and arrays, with
 locals, `if`, `switch` (on `int`/`unsigned`), casts, automatic conversions
 between mixed types (D19), recursion, the opt-in `--lint=c-semantics`
-(D18), and `void` array writers (OD11 c → D20). Adding a type is one table
+(D18), `void` array writers (OD11 c → D20), and console output with `IO`
+(main-spec §8: `printf`, `puts`, `putchar`, `fprintf(stderr, …)`, `main`).
+Adding a type is one table
 row plus a few `case`s: see
 [how-to-extend.md](how-to-extend.md).
 
@@ -132,9 +134,10 @@ guess a coercion.
 
 **Void.** A `void` function is `: Unit`; `return;` is `return ()`, falling
 off the end is fine, and the body of a non-trivial one ends in `pure ()`.
-Functions are pure in Lean, so it can do nothing observable until `printf`
-(§8) exists; it still translates, and `f(x);` is accepted for a `void` `f`
-(as `let _ := f x`). The result of a `void` call used as a value, a `void`
+Functions are pure in Lean, so a `void` function that neither prints nor
+calls one that does can do nothing observable; it still translates, and
+`f(x);` is accepted for it (as `let _ := f x`). One that prints is `IO Unit`
+(see **I/O**). The result of a `void` call used as a value, a `void`
 variable or parameter, and a discarded non-`void` result are refused. The
 one `void` function that does something observable is the **array writer**
 (OD11 c → D20): it returns the modified array instead of `Unit`.
@@ -177,6 +180,52 @@ call whose written argument is not a whole variable (`fill(m[1], n)` — copy
 the row out and back). See `test/cases/array_writer.c` for every emitted
 shape, verified on Lean 4.35.0.
 
+**I/O** (main-spec §8.1, §8.2, §3.3). Output goes through Lean's `IO`.
+
+| C                                    | Lean                                                 |
+| ------------------------------------ | ---------------------------------------------------- |
+| `printf("x");`                       | `IO.print "x"`                                       |
+| `printf("x\n");`                     | `IO.println "x"`                                     |
+| `printf("a=%d\n", a);`               | `IO.println s!"a={a}"`                               |
+| `puts(s);`                           | `IO.println s`                                       |
+| `putchar(c);`                        | `IO.print c`                                         |
+| `fprintf(stderr, …);`                | `IO.eprint` / `IO.eprintln` (`stdout` → `IO.print…`) |
+| a function that prints               | `def f … : IO T := do …`                             |
+| a call to an `IO` function           | `f x` as a statement, `(← f x)` inside an expression |
+| `int main(void)`                     | `def main : IO UInt32` (falling off the end returns 0) |
+| `void main(void)`                    | `def main : IO Unit`                                 |
+| `printf("%d", 2 + 3);` at file scope | `#eval 2 + 3`                                        |
+
+A function is `IO` if it prints or calls an `IO` function (found by a
+fixpoint over the call graph in check.cpp, like the array writers); `main` is
+always `IO`. An `IO` body is always a `do` block, never the one-expression
+shortcut. An `IO` function that is also an array writer (D20) returns
+`IO (Array T)` and its call statement is `x ← f x …`.
+
+*Formats.* The format must be a string literal (cut up by format.cpp). A
+final `\n` chooses `println`. Conversions: `%d %i %u` (any integer; a `char`
+prints its code), `%s` (a `String`; a literal is folded into the text), `%c`
+(a `Char`), `%f %g %e` (a float), `%x %X` (an integer → `hexOf n`, a `bv(N)`
+→ `v.toHex`; `hexOf` is a one-line helper written at the top of the output
+only when needed), `%%`. A literal `{` is written `\{`. Length letters
+(`l`, `ll`, `z`, …) are accepted and mean nothing. Width, flags and precision
+(`%08x`, `%-5d`, `%.2f`) are accepted and **ignored**; `--lint=c-semantics`
+says so (W006, also for every `%f`: Lean prints its own float text).
+Refused, each with a fix: a non-literal format, a wrong argument count,
+`%p %n %o`, `*` widths, an argument of the wrong kind (`bool` for `%d`, an
+`int` for `%f`), `fprintf` to anything but `stdout`/`stderr`, the result of
+`printf` used as a value, a user function named `printf`/`puts`/`putchar`/
+`fprintf` (or `hexOf` when `%x` is used), `main` with parameters, and an `IO`
+call on the right of `&&`/`||` (C short-circuits, `(← …)` would not).
+
+*File scope* (§8.2). A bare `printf`/`puts`/… outside any function becomes a
+`#eval` after all functions. A format that is exactly one specifier →
+`#eval <expr>`; otherwise `#eval IO.print …`, except that a format with
+holes becomes `IO.println` (as the §8.2 table does: `#eval IO.println
+s!"v={f 3}"`). `#eval` output appears when Lean checks the file, not when a
+program runs. If an argument calls an `IO` function the statement becomes
+`#eval do …`.
+
 **Switch.** The scrutinee is `int` or `unsigned` (match patterns on the other
 types are unverified). Labels are integer literals (`3`, `-1`, `0x10`). Labels that
 follow each other become one or-pattern. Each case ends with `break;` or a
@@ -197,15 +246,15 @@ loops (`for`, `while`, `do`, `continue`), `break` outside a switch case's end,
 `?:`, uninitialised scalar locals (`int x;`; arrays may be uninitialised),
 structs, enums, typedefs, unions, `static`/`extern`/`inline`, the §5.4
 bit-vector helpers (`bv_cat` …), the `<string.h>` helpers, `switch` on types
-other than `int`/`unsigned`, `main` special-casing, I/O and `printf`, other
-attributes, preprocessor expansion (`#define` names are recorded; **using**
+other than `int`/`unsigned`, `scanf`/`getchar`/`fgets`, file I/O, `exit`,
+`main(argc, argv)`, `sprintf`/`snprintf`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
 one is an error, not a silent wrong name), Sparkle, theorems.
 
 Diagnostic codes: **E103** (assignment as expression), **E105** (switch
 fall-through), **E110** (`++`/`--` in an expression), **E301** (bit-width
 mismatch), **E302** (bit-vector width not a constant), **E303** (bitwise on
 `int`), **H004** (bitwise on `char`), **E101** (pointers outside §4.6, string
-mutation), **H001** (`bool` array hint) follow the catalogue
+mutation), **H001** (`bool` array hint), **W006** (`printf` formatting simplified) follow the catalogue
 in spec/error-codes.md, which also tracks which codes are implemented.
 **E000** is the placeholder for everything else ("not in the current
 build"); real codes arrive with the features they guard.
@@ -224,13 +273,15 @@ convert and print as tests. The layers ask it; none of them names a type.
       ▼
     parser.cpp   tokens → AST        syntax only; desugars `+=` and `x++;`
       │                              lifts comments out and re-attaches
-      │                              them by position (they never parse)
+      │                              them by position (they never parse);
+      │                              format.cpp cuts a printf format apart
       │
       ▼
     check.cpp    AST   → AST         names, arity, scopes, expression types
       │                              (Expr::type), implicit conversions,
       │                              tests-vs-values, every path returns,
       │                              switch rules; marks which locals are `mut`
+      │                              and which functions are `IO`
       ▼
     lint.cpp     AST   → notes       only with --lint=c-semantics: where C behaves
       │                              differently (W001–W014); never changes the tree
@@ -238,12 +289,14 @@ convert and print as tests. The layers ask it; none of them names a type.
     toposort.cpp AST   → AST         callees first; marks recursion / mutual groups
       │
       ▼
-    emitter.cpp  AST   → Lean text   (merged params, `-- c:` comments)
+    emitter.cpp  AST   → Lean text   (merged params, `-- c:` comments, IO, #eval)
 
 - `types.h` — `Type` plus: C words → type, declarators (`*`, `[N]`) → type,
   type → Lean name, `unify` (the common type of `a + b`), per-type operator
   rules, `flowKind`/`convert` (casts and implicit conversions), `truthTest`,
   `zeroValue`.
+- `format.h` — one helper for the parser: a `printf` format → literal and
+  conversion pieces (§8.1). No types, no arguments.
 - `ast.h` — the data all layers speak; `diag.h` — the error type and the
   §13.1 message format.
 - Each source file's header comment repeats its layer and its inputs/outputs.
@@ -281,10 +334,11 @@ The suite (`test/run_e2e.sh`, `make test`):
    by default.
 
 Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run here (2026-10-19, after the OD11 slice)
-**with Lean 4.35.0**: all passing — golden diffs, refusals, lint reports and
-the `.checks.lean` of every case including `array_writer` (77/77), plus
-`run_e2e_hard.sh`.
+`lean` is missing). Last full run **with Lean 4.35.0**: 2026-10-19, after the
+OD11 slice — all passing (77/77, plus `run_e2e_hard.sh`). The I/O slice
+(2026-10-20) was run **without Lean**: golden diffs, refusals and lint
+reports pass (92/92); the five `io*` cases' generated Lean and `.checks.lean`
+(including the `#guard_msgs` output checks) still await a Lean run.
 
 ## Main-spec decisions honored here
 
@@ -314,8 +368,13 @@ the `.checks.lean` of every case including `array_writer` (77/77), plus
   `-7/2 = -3`, `-7%2 = -1`; Lean's `/` and `%` on `Int` give `-4` and `1`.
   clean keeps Lean's; `--lint=c-semantics` says where (W014). On `intN_t`
   Lean truncates like C, on `Nat` and `uintN_t` there is no difference.
-- **`main` is not special yet** (§7.1 says `IO UInt32`); today it is an
-  ordinary `Int` function.
+- **`main` returns `UInt32`**, so `return -1;` from `int main` is refused
+  (a negative literal for an unsigned type); write `return 255;`.
+- **File-scope `printf` with holes is `IO.println`** even without a `\n`,
+  following the §8.2 table; plain `printf("x")` stays `IO.print`.
+- **`printf` is not C's:** width, flags and precision are dropped, `%f` is
+  Lean's float text, `%x` of a negative `int` clamps to 0 (W009). W006 says
+  so.
 - **No macro expansion**: `#define`d names are rejected when used.
 - **Comments:** every position C allows is kept (see **Comments** above);
   only comments around a stray `;` are dropped with it. In-signature spots
@@ -346,8 +405,9 @@ the `.checks.lean` of every case including `array_writer` (77/77), plus
 ## Next slices (suggested, one e2e case each)
 
 1. Range-`for` (§6.1) and `while`; `break`/`continue` inside them.
-2. `printf` → `IO` (§8), which makes `void` functions useful and brings the
-   `main : IO UInt32` rule.
+2. Input (`scanf`, `getchar`, `fgets(stdin)`, §8.1 🟡) and `exit(n)`, then
+   file I/O (`IO.FS`) and `main(argc, argv)`. `sprintf` → `s!` fits the same
+   format cutter.
 3. Structs, enums, typedefs (§4.5): they need file-scope declarations in the
    AST, which is the next structural step. Also unlocks `switch` on enums.
 4. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also

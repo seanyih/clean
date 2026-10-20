@@ -16,6 +16,8 @@
 #include <cstdlib>
 #include <utility>
 
+#include "format.h"
+
 namespace {
 
 const char* kSliceWhy =
@@ -34,6 +36,11 @@ const std::set<std::string> kLeanKeywords = {
     "Float", "Float32", "BitVec", "Array", "List", "Option", "true", "false", "decide",
     "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64", "use",
 };
+
+// The C output functions clean turns into `IO` (main-spec §8.1).
+bool isPrintName(const std::string& w) {
+    return w == "printf" || w == "puts" || w == "putchar" || w == "fprintf";
+}
 
 // Statement keywords that come in a later slice.
 const std::set<std::string> kLaterStatements = {"while", "for", "do", "goto", "continue"};
@@ -670,6 +677,63 @@ struct Parser {
         return s;
     }
 
+    // `printf(fmt, args);` `fprintf(stderr, fmt, args);` `puts(s);` `putchar(c);` — main-spec §8.
+    // The format must be a string literal: it is cut into pieces here (format.h) because
+    // the Lean `s!"…"` is built at translation time. Which argument fits which conversion
+    // is check.cpp's question; how many there are is answered here.
+    Stmt parsePrint() {
+        Stmt s;
+        s.kind = Stmt::Kind::Print;
+        s.loc = peek().loc;
+        s.name = toks[i++].text;
+        expectPunct("(", "after `" + s.name + "`");
+        const bool formatted = s.name == "printf" || s.name == "fprintf";
+        if (s.name == "fprintf") {
+            if (peek().kind == Token::Kind::Ident && (peek().text == "stderr" || peek().text == "stdout")) {
+                s.toStderr = peek().text == "stderr";
+                ++i;
+            } else {
+                failHere("`fprintf` to something other than `stderr` or `stdout`",
+                         "writing to files needs `fopen` and `IO.FS`, which main-spec §8.1 keeps 🟡.",
+                         "print to `stdout` or `stderr`.");
+            }
+            expectPunct(",", "after the stream of `fprintf`");
+        }
+        if (formatted) {
+            if (peek().kind != Token::Kind::StringLit)
+                failHere("the format of `" + s.name + "` is not a string literal",
+                         "clean builds the Lean `s!\"…\"` while translating, so it must see the format.",
+                         "write the format as a literal: `printf(\"%s\", text)` prints a string variable.");
+            Loc at = peek().loc;
+            std::string text = toks[i++].text;
+            while (peek().kind == Token::Kind::StringLit) {  // "a" "b" is one literal in C
+                text = text.substr(0, text.size() - 1) + peek().text.substr(1);
+                ++i;
+            }
+            FormatResult f = parseFormat(text.substr(1, text.size() - 2));
+            if (!f.ok) fail(file, at, f.problem, f.why, f.fix);
+            s.pieces = std::move(f.pieces);
+            s.newline = f.newline;
+            while (isPunct(",")) {
+                ++i;
+                s.args.push_back(parseExpr());
+            }
+            size_t convs = 0;
+            for (const FmtPiece& p : s.pieces) convs += p.conv != 0;
+            if (convs != s.args.size())
+                fail(file, at,
+                     "the format of `" + s.name + "` has " + std::to_string(convs) + " conversion(s) but " +
+                         std::to_string(s.args.size()) + " argument(s) follow",
+                     "each conversion consumes one argument; C leaves a mismatch undefined.",
+                     "make the number of arguments match the conversions.");
+        } else {
+            s.args.push_back(parseExpr());
+        }
+        expectPunct(")", "to close the argument list of `" + s.name + "`");
+        expectPunct(";", "after `" + s.name + "(…)`");
+        return s;
+    }
+
     Stmt parseStmt() {
         Stmt s;
         s.loc = peek().loc;
@@ -754,6 +818,7 @@ struct Parser {
                      "loops arrive in a later slice (see the plan in spec/impl-spec.md).",
                      "write the computation without loops for now.");
         if (atTypeWord()) parseCType();  // a type clean does not translate: refused with the reason
+        if (isPrintName(w) && peek2().kind == Token::Kind::Punct && peek2().text == "(") return parsePrint();
         if (atAssignment()) return parseAssignment();
         if (peek2().kind == Token::Kind::Punct && peek2().text == "(") {  // `f(args);` (check.cpp: void only)
             s.kind = Stmt::Kind::CallStmt;
@@ -928,6 +993,16 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         }
         if (p.isPunct(";")) {  // stray semicolon at file scope (C23 allows it)
             ++p.i;
+            continue;
+        }
+        if (p.peek().kind == Token::Kind::Ident && isPrintName(p.peek().text) &&
+            p.peek2().kind == Token::Kind::Punct && p.peek2().text == "(") {  // script mode (§8.2)
+            Stmt st = p.parsePrint();
+            st.script = true;
+            st.comments = std::move(pending);
+            pending.clear();
+            for (Comment& c : p.takeComments(p.i, false)) st.comments.push_back(std::move(c));
+            unit.scripts.push_back(std::move(st));
             continue;
         }
         bool isPartial = false;

@@ -30,7 +30,7 @@
 //   Cast     one kid, `type` = target: `(T)x`, or an implicit conversion
 //            inserted by check.cpp (`implicit`)
 //   Binary   text = operator (+ - * / % & | ^ << >>), kids [lhs, rhs]
-//   Call     text = callee name, kids = arguments
+//   Call     text = callee name, kids = arguments; `io` = the callee is an `IO` function
 //   Cmp      text = < <= > >= == !=, kids [lhs, rhs]      } "conditions":
 //   And, Or  kids [lhs, rhs]                              } only legal where
 //   Not      one kid                                      } a test is expected
@@ -48,6 +48,14 @@ struct Expr {
     Loc loc;  // start of the expression, for diagnostics
     Type type;  // the C type of the value; set by check.cpp (parser: Cast target, BvLit width)
     bool implicit = false;  // Cast: inserted by check.cpp, not written in the C source
+    bool io = false;        // Call: the callee does I/O, so Lean needs `(← f x)` (check.cpp)
+};
+
+// One piece of a `printf` format (format.h): literal text, or one conversion.
+struct FmtPiece {
+    std::string lit;      // conv == 0: the text, in Lean spelling (escapes already re-spelled)
+    char conv = 0;        // 0 = literal; else d i (`d`), u, s, c, f (%f %g %e), x, X
+    bool padded = false;  // width / flags / precision were written; they are ignored (lint W006)
 };
 
 // A C comment kept for the output. `block` = it was `/* … */` (else `// …`).
@@ -80,10 +88,14 @@ struct Case {
 //   Return  `return expr;`          expr   (`return;`: noValue)
 //   Switch  `switch (expr) {…}`     expr, cases
 //   Block   `{ body }`              body
+//   Print   `printf(…);` `puts(s);` `putchar(c);` `fprintf(stderr, …);`   (main-spec §8)
+//                                   name = the C function, toStderr, pieces + newline (printf
+//                                   family), args = the arguments (printf: one per conversion;
+//                                   puts/putchar: the one value), script = at file scope
 //   Break   `break;`                only transient: the parser strips the legal
 //                                   ones from switch cases and rejects the rest
 struct Stmt {
-    enum class Kind { Decl, Assign, CallStmt, If, Return, Switch, Block, Break };
+    enum class Kind { Decl, Assign, CallStmt, If, Return, Switch, Block, Break, Print };
     Kind kind = Kind::Return;
     std::string name;
     Type type;                          // Decl: the declared type
@@ -99,6 +111,11 @@ struct Stmt {
                                       // parameters (OD11 c); this variable receives the returned
                                       // array, emitted `x := f …` instead of `let _ := f …`
     bool noValue = false;             // Return: `return;` in a `void` function
+    std::vector<FmtPiece> pieces;     // Print (printf, fprintf): the format, cut up
+    bool newline = false;             // Print (printf, fprintf): the format ended in `\n` (cut off)
+    bool toStderr = false;            // Print: `fprintf(stderr, …)`
+    bool script = false;              // Print: at file scope, becomes `#eval` (§8.2)
+    std::vector<Expr> args;           // Print: the arguments after the format
     std::vector<Comment> comments;    // comments the parser attached to this statement
     std::vector<Comment> bodyTrailing; // If: before the then-branch's `}`; Block: before its `}`
     std::vector<Comment> elseTrailing; // If: before the else-branch's `}`
@@ -113,9 +130,11 @@ void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
     for (const Stmt& s : stmts) {
         for (const Expr& ix : s.indices) f(ix);
         const bool noExpr = s.kind == Stmt::Kind::Block || s.kind == Stmt::Kind::Break ||
+                            s.kind == Stmt::Kind::Print ||
                             (s.kind == Stmt::Kind::Decl && s.noInit) ||
                             (s.kind == Stmt::Kind::Return && s.noValue);
         if (!noExpr) f(s.expr);
+        for (const Expr& a : s.args) f(a);
         forEachExpr(s.body, f);
         forEachExpr(s.elseBody, f);
         for (const Case& c : s.cases) forEachExpr(c.body, f);
@@ -136,6 +155,8 @@ struct Function {
     int writerParam = -1;               // `void` function that writes exactly one array parameter
                                        // (OD11 c, check.cpp): that parameter's index; -1 = none.
                                        // The emitter returns the modified array instead of Unit.
+    bool isIO = false;                  // prints, or calls something that does; `main` always (check.cpp)
+                                       // → `: IO T := do` (main-spec §3.3)
     bool recursive = false;             // reaches itself through calls (toposort.cpp)
     int mutualGroup = -1;               // ≥ 0: member of a `mutual … end` block with this id (toposort.cpp)
 };
@@ -147,4 +168,6 @@ struct TranslationUnit {
     std::set<std::string> pragmas;      // `#pragma lean NAME` words (set by main from the lexer)
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build
     std::vector<Comment> trailingComments;  // comments after the last definition
+    std::vector<Stmt> scripts;          // file-scope `printf` etc. (§8.2), source order; emitted as `#eval` after the functions
+    bool needsHexOf = false;            // some `%x` needs the generated `hexOf` helper (check.cpp)
 };

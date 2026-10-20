@@ -213,11 +213,92 @@ void findWriters(TranslationUnit& unit, const std::string& file) {
     }
 }
 
+// ---- I/O (main-spec §3.3, §8) ----------------------------------------------------
+//
+// A function is `IO` when it prints, or calls a function that does; `main` is
+// always `IO`. Like the writers above, the answer flows backwards along call
+// edges, so it is a fixpoint over the whole file, run before the per-function
+// checks (which need to know which calls need `(← f x)`).
+
+bool isPrintFunction(const std::string& name) {
+    return name == "printf" || name == "puts" || name == "putchar" || name == "fprintf";
+}
+
+bool hasPrint(const std::vector<Stmt>& list) {
+    for (const Stmt& s : list) {
+        if (s.kind == Stmt::Kind::Print) return true;
+        if (hasPrint(s.body) || hasPrint(s.elseBody)) return true;
+        for (const Case& c : s.cases)
+            if (hasPrint(c.body)) return true;
+    }
+    return false;
+}
+
+bool callsAny(const Expr& e, const std::set<std::string>& names) {
+    if (e.kind == Expr::Kind::Call && names.count(e.text)) return true;
+    for (const Expr& k : e.kids)
+        if (callsAny(k, names)) return true;
+    return false;
+}
+
+void findIO(TranslationUnit& unit) {
+    std::set<std::string> io;
+    for (Function& f : unit.functions) {
+        f.isIO = f.name == "main" || hasPrint(f.body);
+        if (f.isIO) io.insert(f.name);
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (Function& f : unit.functions) {
+            if (f.isIO) continue;
+            bool calls = false;
+            forEachExpr(f.body, [&](const Expr& e) { calls = calls || callsAny(e, io); });
+            if (calls) {
+                f.isIO = true;
+                io.insert(f.name);
+                changed = true;
+            }
+        }
+    }
+}
+
+// `main` (main-spec §7.1): `int main(void)` is `IO UInt32`, `void main(void)` is `IO Unit`.
+// The int version may fall off the end (C99: that returns 0), so the 0 is written in here.
+void prepareMain(TranslationUnit& unit) {
+    for (Function& f : unit.functions) {
+        if (f.name != "main") continue;
+        const Loc at{f.defLine, 1};
+        if (!f.params.empty())
+            fail(unit.fileName, at, "`main` takes parameters",
+                 "`main(int argc, char **argv)` needs `List String` arguments and pointer-to-pointer, "
+                 "which main-spec §7.1 keeps 🟡.",
+                 "write `int main(void)`.");
+        if (f.retType.kind == Type::Kind::Int) {
+            f.retType = Type::of(Type::Kind::UInt, 32);  // `IO UInt32`
+            if (!returnsOnAllPaths(f.body)) {
+                Stmt ret;
+                ret.kind = Stmt::Kind::Return;
+                ret.loc = at;
+                ret.expr.kind = Expr::Kind::IntLit;
+                ret.expr.text = "0";
+                ret.expr.loc = at;
+                f.body.push_back(std::move(ret));
+            }
+        } else if (f.retType.kind != Type::Kind::Unit) {
+            fail(unit.fileName, at, "`main` returns `" + cName(f.retType) + "`",
+                 "main-spec §7.1 knows `int main` (`IO UInt32`) and `void main` (`IO Unit`).",
+                 "return `int`, or `void`.");
+        }
+    }
+}
+
 // ---- the checker ----------------------------------------------------------
 
 struct Sig {
     std::vector<Type> params;
     Type ret;
+    bool io = false;  // the function does I/O (findIO)
 };
 
 // A visible name: its type, and its Decl (nullptr for a parameter) so
@@ -234,6 +315,7 @@ struct Checker {
     const std::set<std::string>& pragmas;    // `#pragma lean …` words
     std::vector<DiagError>& notes;           // hints (H…) the unit carries to main
     const std::map<std::string, int>& writers;  // name → written array parameter's index (OD11 c)
+    bool& usesHex;                              // a `%x` that needs the `hexOf` helper was seen
     // scopes[0] holds the parameters and the function's top-level locals.
     std::vector<std::map<std::string, Var>> scopes;
     std::vector<bool> bare;  // per scope: opened by a bare `{ }` block (flattened in Lean)
@@ -377,6 +459,10 @@ struct Checker {
                 fail(file, e.loc, "variable `" + e.text + "` is called like a function",
                      "function values are not translated.",
                      "call a defined function, or drop the call.");
+            if (isPrintFunction(e.text))
+                fail(file, e.loc, "the result of `" + e.text + "(…)` is used as a value",
+                     "`" + e.text + "` is translated as an `IO` action, which has no number to give back.",
+                     "call it as a statement, on its own line.");
             auto it = sigs.find(e.text);
             if (it == sigs.end())
                 fail(file, e.loc, "`" + e.text + "` is called but not defined in this file",
@@ -388,6 +474,7 @@ struct Checker {
                      "the arity is checked here so that Lean does not have to report it.",
                      "match the parameter list.");
             for (size_t k = 0; k < e.kids.size(); ++k) valueAs(e.kids[k], it->second.params[k]);
+            e.io = it->second.io;
             return it->second.ret;
         }
         case Expr::Kind::Cmp:
@@ -400,6 +487,16 @@ struct Checker {
                  "use it as an `if` condition (`if (c) x = 1; else x = 0;`), or store it in a `bool`.");
         }
         return e.type;  // unreachable: every case above returns or throws
+    }
+
+    // `a && f(x)` short-circuits in C; Lean's `(← f x)` is run before the `&&`, always.
+    void noIO(const Expr& e) {
+        if (e.kind == Expr::Kind::Call && e.io)
+            fail(file, e.loc, "the I/O function `" + e.text + "` is called inside `&&` / `||`",
+                 "C skips the right side when the left decides; Lean would run the call every time, "
+                 "so the output would differ.",
+                 "call it first and keep the result: `int r = " + e.text + "(…);`.");
+        for (const Expr& k : e.kids) noIO(k);
     }
 
     // `a OP b` of a comparison: both sides converted to their common type (D19).
@@ -424,6 +521,7 @@ struct Checker {
         case Expr::Kind::Or:
             valueAs(e.kids[0], Type::of(Type::Kind::Bool));
             valueAs(e.kids[1], Type::of(Type::Kind::Bool));
+            noIO(e.kids[1]);
             break;
         case Expr::Kind::Not:
             valueAs(e.kids[0], Type::of(Type::Kind::Bool));
@@ -479,6 +577,7 @@ struct Checker {
         case Expr::Kind::Or:
             cond(e.kids[0]);
             cond(e.kids[1]);
+            noIO(e.kids[1]);
             return;
         case Expr::Kind::Not:
             cond(e.kids[0]);
@@ -602,6 +701,80 @@ struct Checker {
         }
     }
 
+    // `printf` / `fprintf` / `puts` / `putchar` (main-spec §8.1): every argument must be the
+    // kind its conversion reads. Mixed types are converted as everywhere (D19); what has no
+    // sensible reading (a `bool` for `%d`, an `int` for `%f`) is refused, not guessed.
+    void printStmt(Stmt& s) {
+        if (s.name == "puts") {
+            valueAs(s.args[0], Type::of(Type::Kind::String));
+            return;
+        }
+        if (s.name == "putchar") {
+            valueAs(s.args[0], Type::of(Type::Kind::Char));
+            return;
+        }
+        size_t next = 0;
+        for (const FmtPiece& p : s.pieces) {
+            if (!p.conv) continue;
+            Expr& a = s.args[next++];
+            const Type nat = Type::of(Type::Kind::Nat);
+            auto refuse = [&](const Type& t, const std::string& why, const std::string& fix) {
+                fail(file, a.loc, "a value of type `" + cName(t) + "` is printed with `%" + std::string(1, p.conv) + "`",
+                     why, fix);
+            };
+            switch (p.conv) {
+            case 's':
+                valueAs(a, Type::of(Type::Kind::String));
+                break;
+            case 'c':
+                valueAs(a, Type::of(Type::Kind::Char));
+                break;
+            case 'd':
+            case 'u': {
+                Type t = value(a);
+                switch (t.kind) {
+                case Type::Kind::Literal: case Type::Kind::Int: case Type::Kind::Nat:
+                case Type::Kind::SInt: case Type::Kind::UInt: case Type::Kind::BitVec:
+                    break;
+                case Type::Kind::Char:
+                    coerce(a, nat);  // C prints the character code
+                    break;
+                default:
+                    refuse(t, "`%d` and `%u` print integers; clean does not guess how to show anything else.",
+                           "use `%s`, `%c` or `%f`, or convert the value to an integer first.");
+                }
+                break;
+            }
+            case 'f': {
+                Type t = value(a);
+                if (!isFloat(t) && t.kind != Type::Kind::FloatLiteral)
+                    refuse(t, "`%f` `%g` `%e` print floating-point values; C leaves an integer there undefined.",
+                           "cast it: `(double)x`.");
+                break;
+            }
+            case 'x':
+            case 'X': {
+                Type t = value(a);
+                switch (t.kind) {
+                case Type::Kind::BitVec:  // `x.toHex`: no helper needed
+                    break;
+                case Type::Kind::Literal: case Type::Kind::Nat:
+                    usesHex = true;
+                    break;
+                case Type::Kind::Int: case Type::Kind::SInt: case Type::Kind::UInt:
+                    coerce(a, nat);  // the digits of the number (a negative `int` clamps to 0, lint W009)
+                    usesHex = true;
+                    break;
+                default:
+                    refuse(t, "`%x` prints an integer in hexadecimal.",
+                           "convert the value to an integer first.");
+                }
+                break;
+            }
+            }
+        }
+    }
+
     void stmts(std::vector<Stmt>& list) {
         bool dead = false;
         for (Stmt& s : list) {
@@ -707,6 +880,9 @@ struct Checker {
                 break;
             case Stmt::Kind::Break:
                 break;  // the parser already rejected the stray ones
+            case Stmt::Kind::Print:
+                printStmt(s);
+                break;
             }
             if (stmtReturns(s)) dead = true;
         }
@@ -734,6 +910,14 @@ struct Checker {
 }  // namespace
 
 void check(TranslationUnit& unit) {
+    for (const Function& f : unit.functions)
+        if (isPrintFunction(f.name))
+            fail(unit.fileName, Loc{f.defLine, 1}, "`" + f.name + "` is defined in this file",
+                 "clean translates calls to `" + f.name + "` as console output (main-spec §8.1), "
+                 "so a function of that name would never be called.",
+                 "rename the function.");
+    prepareMain(unit);  // `int main` → `IO UInt32`, before the signatures are taken
+    findIO(unit);       // which functions are `IO`
     std::map<std::string, Sig> sigs;
     for (const Function& f : unit.functions) {
         if (sigs.count(f.name))
@@ -741,6 +925,7 @@ void check(TranslationUnit& unit) {
                  "Lean allows only one definition per name.", "rename one of them.");
         Sig sig;
         sig.ret = f.retType;
+        sig.io = f.isIO;
         for (const auto& p : f.params) sig.params.push_back(p.first);
         sigs[f.name] = sig;
     }
@@ -749,5 +934,23 @@ void check(TranslationUnit& unit) {
     for (const Function& f : unit.functions)
         if (f.writerParam >= 0) writers[f.name] = f.writerParam;
     for (Function& f : unit.functions)
-        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, {}, {}}.run();
+        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.needsHexOf, {}, {}}.run();
+
+    // File-scope `printf` etc. (main-spec §8.2): checked like the body of a `void` function with
+    // no parameters, so names, types and arities get the same treatment.
+    if (!unit.scripts.empty()) {
+        Function script;
+        script.name = "<file scope>";
+        script.retType = Type::of(Type::Kind::Unit);
+        script.body = std::move(unit.scripts);
+        Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.needsHexOf, {}, {}}.run();
+        unit.scripts = std::move(script.body);
+    }
+
+    if (unit.needsHexOf)  // the generated helper's name must be free
+        for (const Function& f : unit.functions)
+            if (f.name == "hexOf")
+                fail(unit.fileName, Loc{f.defLine, 1}, "`hexOf` is defined, and `%x` needs a helper of that name",
+                     "clean writes `def hexOf` into the output for `printf(\"%x\", …)` (main-spec §8.1).",
+                     "rename your function.");
 }

@@ -1,7 +1,7 @@
 # How to extend `clean` — a developer's manual
 
 For downstream developers: where a feature lives, which files to touch, and
-how to prove it works. State: slices 0–6 (2026-10-19). If the architecture
+how to prove it works. State: slices 0–8 (2026-10-20). If the architecture
 moves, update this file with your slice.
 
 ## The pipeline (src/)
@@ -14,6 +14,7 @@ moves, update this file with your slice.
       │                              so the parser can point at line:col)
       ▼
     parser.cpp    tokens → AST      syntax only; desugars `x += e` → `x = x + e`
+      │     (format.cpp cuts a printf format into pieces)
       │                              and `x++;` → `x = x + 1`
       ▼
     check.cpp     AST → AST         names, arity, scopes, expression types

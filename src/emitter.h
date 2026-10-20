@@ -3,7 +3,8 @@
 // Layer: back-end. Input: a TranslationUnit; Output: the complete .lean file
 // as a string (header note, `-- c:` traceability comments, `def` lines).
 // Idiomatic output per D3: merged parameter groups, minimal parentheses
-// (C and Lean agree on precedence for the slice-0 operators).
+// (C and Lean agree on precedence for the slice-0 operators). `IO` functions,
+// `IO.print…` statements and file-scope `#eval`s are covered in emitter.cpp.
 
 #pragma once
 

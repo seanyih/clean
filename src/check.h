@@ -11,7 +11,11 @@
 //   * every path returns, and nothing follows a `return` in the same block;
 //   * switch: one `default` at most, no duplicate labels, no fall-through
 //     from a non-empty group (E105);
-//   * which locals/parameters are assigned again (they become `let mut`).
+//   * which locals/parameters are assigned again (they become `let mut`);
+//   * I/O (main-spec §8): which functions are `IO` (they print, or call one
+//     that does; `main` always), that each `printf`/`puts`/`putchar` argument
+//     fits its conversion, `int main` → `UInt32` result, and the file-scope
+//     (script-mode) statements.
 // Definition order and recursion are NOT checked here: see toposort.h.
 
 #pragma once

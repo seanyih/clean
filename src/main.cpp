@@ -1,6 +1,6 @@
 // main.cpp — command line entry: wire the layers together.
 //
-// Layer: driver (lex → parse → check → [lint] → sort → emit). Input: `clean <input.c> [-o <output.lean>] [--lint=c-semantics]` (argv).
+// Layer: driver (lex → parse [format] → check → [lint] → sort → emit). Input: `clean <input.c> [-o <output.lean>] [--lint=c-semantics]` (argv).
 // Output: one .lean file (default: the input path with `.c` → `.lean`), a
 // one-line summary on stdout; diagnostics go to stderr with exit 1 (see
 // diag.h), usage errors exit 2.

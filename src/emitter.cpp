@@ -19,6 +19,13 @@
 //     end become `return a`, a value-yielding `if` gets a missing-`else`
 //     `return a` arm, and a writer call statement re-assigns the variable
 //     that was passed (`fill(x, n);` → `x := fill x n`);
+//   * I/O (main-spec §8): a function that prints or calls one that does is
+//     `: IO T := do` (always a `do`, never the one-expression shortcut); a call
+//     to such a function inside an expression is `(← f x)`, as a statement just
+//     `f x`; `printf`/`puts`/`putchar`/`fprintf(stderr, …)` become `IO.print`
+//     / `IO.println` / `IO.eprint` / `IO.eprintln` with the format turned into
+//     an `s!"…"` interpolation; file-scope ones become `#eval` after the
+//     functions (§8.2); `%x` uses a small generated `hexOf` helper;
 //   * comments travel with the tree and are printed at the nearest legal
 //     spot: `//` → `--`, `/* */` → `/- -/`, above the statement they belong
 //     to; the ones that closed a block or a file land there (see parser.h
@@ -75,14 +82,17 @@ int level(const Expr& e) {
     case Expr::Kind::Cmp:    return cmpIsBool(cmpType(e), e.text) ? 50 : 90;  // `a == b` / `decide (…)`
     case Expr::Kind::And:    return 35;
     case Expr::Kind::Or:     return 30;
+    case Expr::Kind::Call:   return e.io ? 100 : 90;  // `(← f x)` is an atom, an application is not
     case Expr::Kind::Not:
-    case Expr::Kind::Cast:
-    case Expr::Kind::Call:   return 90;  // applications
+    case Expr::Kind::Cast:   return 90;
     default:                 return 100;
     }
 }
 
 void emitExpr(const Expr& e, std::string& out);
+
+// `f a b` — the call itself, without the `(← …)` an I/O function needs inside an expression.
+void emitCall(const Expr& e, std::string& out);
 
 // `e` as an argument or as the receiver of `.toNat`: parenthesised unless atomic.
 void emitAtom(const Expr& e, std::string& out) {
@@ -93,6 +103,14 @@ void emitAtom(const Expr& e, std::string& out) {
     out += '(';
     emitExpr(e, out);
     out += ')';
+}
+
+void emitCall(const Expr& e, std::string& out) {
+    out += e.text;
+    for (const Expr& arg : e.kids) {
+        out += ' ';
+        emitAtom(arg, out);
+    }
 }
 
 void emitChild(const Expr& e, int parentLevel, bool right, std::string& out) {
@@ -142,11 +160,9 @@ void emitExpr(const Expr& e, std::string& out) {
         return;
     }
     case Expr::Kind::Call:
-        out += e.text;
-        for (const Expr& arg : e.kids) {
-            out += ' ';
-            emitAtom(arg, out);
-        }
+        if (e.io) out += "(← ";  // an I/O function: run it, use the result (main-spec §8)
+        emitCall(e, out);
+        if (e.io) out += ")";
         return;
     case Expr::Kind::Binary: {
         const int me = leanLevel(e.text);
@@ -337,6 +353,115 @@ void emitSwitch(const Stmt& s, int level, const std::string& wret, bool yield, s
     }
 }
 
+// ---- printing (main-spec §8) ----------------------------------------------
+
+// `x` in a `s!"{…}"` hole or after `IO.print`: parenthesised when it has a space.
+std::string spaced(const std::string& x) { return x.find(' ') == std::string::npos ? x : "(" + x + ")"; }
+
+bool hasIOCall(const Expr& e) {
+    if (e.kind == Expr::Kind::Call && e.io) return true;
+    for (const Expr& k : e.kids)
+        if (hasIOCall(k)) return true;
+    return false;
+}
+
+// What one conversion prints, as a Lean term. `ascribe`: a bare numeral in a `{…}` hole gets its
+// type (`(5 : Int)`), because `toString (-5)` alone leaves Lean to guess it; `#eval 2 + 3` does not.
+std::string convText(const FmtPiece& p, const Expr& a, bool ascribe) {
+    std::string v;
+    emitExpr(a, v);
+    switch (p.conv) {
+    case 'd':
+    case 'u':
+        if (ascribe && a.type.kind == Type::Kind::Literal) return "(" + v + " : " + (p.conv == 'd' ? "Int" : "Nat") + ")";
+        return v;
+    case 'x':
+    case 'X': {
+        std::string hex;
+        if (a.type.kind == Type::Kind::BitVec) {  // `BitVec.toHex`
+            std::string atom;
+            emitAtom(a, atom);
+            hex = atom + ".toHex";
+        } else {
+            hex = "hexOf " + spaced(v);
+        }
+        return p.conv == 'X' ? "(" + hex + ").toUpper" : hex;
+    }
+    default:
+        return v;
+    }
+}
+
+// A `%s` whose argument is a string literal needs no hole: its text joins the literal text.
+bool inlined(const FmtPiece& p, const Expr& a) { return p.conv == 's' && a.kind == Expr::Kind::StringLit; }
+
+// The Lean string for a format: plain `"…"`, or `s!"…{x}…"` when some conversion needs a hole.
+std::string formatString(const Stmt& s) {
+    bool holes = false;
+    size_t k = 0;
+    for (const FmtPiece& p : s.pieces)
+        if (p.conv) holes = holes || !inlined(p, s.args[k++]);
+    auto text = [&](const std::string& t, std::string& out) {
+        for (char c : t) {  // in `s!` a literal `{` is written `\{`
+            if (holes && c == '{') out += '\\';
+            out += c;
+        }
+    };
+    std::string out = holes ? "s!\"" : "\"";
+    size_t next = 0;
+    for (const FmtPiece& p : s.pieces) {
+        if (!p.conv) {
+            text(p.lit, out);
+            continue;
+        }
+        const Expr& a = s.args[next++];
+        if (inlined(p, a))
+            text(a.text.substr(1, a.text.size() - 2), out);  // the literal, quotes off
+        else
+            out += "{" + convText(p, a, true) + "}";
+    }
+    return out + "\"";
+}
+
+bool formatHasHoles(const Stmt& s) {
+    for (const FmtPiece& p : s.pieces)
+        if (p.conv) return true;
+    return false;
+}
+
+// The `IO` action of a print statement: `IO.println s!"a={a}"`.
+std::string printAction(const Stmt& s) {
+    std::string arg;
+    if (s.name == "puts" || s.name == "putchar") {
+        emitAtom(s.args[0], arg);
+        return std::string(s.name == "puts" ? "IO.println " : "IO.print ") + arg;
+    }
+    bool newline = s.newline;
+    // §8.2: at file scope, a format with holes becomes `IO.println` (the `#eval` output is line by line)
+    if (s.script && !s.toStderr && formatHasHoles(s)) newline = true;
+    const char* fn = s.toStderr ? (newline ? "IO.eprintln " : "IO.eprint ") : (newline ? "IO.println " : "IO.print ");
+    return fn + formatString(s);
+}
+
+// §8.2: a file-scope format that is exactly one specifier is `#eval <expr>`.
+bool isBareEval(const Stmt& s) {
+    if (!s.script || s.toStderr || s.name != "printf" || s.newline || s.pieces.size() != 1 || !s.pieces[0].conv)
+        return false;
+    return !hasIOCall(s.args[0]);
+}
+
+// `#eval …` for one file-scope statement. An I/O call inside needs a `do` to run it.
+void emitScript(const Stmt& s, std::string& out) {
+    emitComments(s.comments, "", out);
+    if (isBareEval(s)) {
+        out += "#eval " + convText(s.pieces[0], s.args[0], false) + "\n";
+        return;
+    }
+    bool io = false;
+    for (const Expr& a : s.args) io = io || hasIOCall(a);
+    out += io ? "#eval do\n  " + printAction(s) + "\n" : "#eval " + printAction(s) + "\n";
+}
+
 // ---- arrays ---------------------------------------------------------------
 
 // `x` as a function argument: parenthesised when it has a space.
@@ -412,13 +537,19 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
             out += "\n";
             break;
         case Stmt::Kind::CallStmt:
-            if (!s.writeBack.empty()) {  // a writer call: the modified array comes back (OD11 c)
+            if (s.expr.io) {  // an I/O function: run it; a writer's array is bound back with `←`
+                out += pad(level) + (s.writeBack.empty() ? "" : s.writeBack + " ← ");
+            } else if (!s.writeBack.empty()) {  // a writer call: the modified array comes back (OD11 c)
                 out += pad(level) + s.writeBack + " := ";
             } else {  // a plain `void` call: pure, so it can only be run for show
                 out += pad(level) + "let _ := ";
             }
-            emitExpr(s.expr, out);
+            if (s.expr.io) emitCall(s.expr, out);
+            else emitExpr(s.expr, out);
             out += "\n";
+            break;
+        case Stmt::Kind::Print:
+            out += pad(level) + printAction(s) + "\n";
             break;
         case Stmt::Kind::Return:
             out += pad(level) + "return ";
@@ -472,7 +603,7 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
     const std::string wret = writer ? f.params[(size_t)f.writerParam].second : "";
     // A writer's one-statement body can only be `return;`, which needs the `do`
     // block's `return a` — so writers never take the single-expression shortcut.
-    bool oneReturn = !writer && f.body.size() == 1 && f.body[0].kind == Stmt::Kind::Return;
+    bool oneReturn = !writer && !f.isIO && f.body.size() == 1 && f.body[0].kind == Stmt::Kind::Return;
     if (oneReturn) emitComments(f.body[0].comments, "", out);  // no `do` block to hold them
     if (f.recursive && !f.isPartial)
         out += "-- note: recursive. Lean must prove it terminates; if it cannot, put "
@@ -501,7 +632,8 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
         out += ")";
     }
     // A writer returns the array it modified instead of `Unit` (OD11 c).
-    out += " : " + leanName(writer ? f.params[(size_t)f.writerParam].first : f.retType) + " := ";
+    const std::string result = leanName(writer ? f.params[(size_t)f.writerParam].first : f.retType);
+    out += " : " + (f.isIO ? "IO " + spaced(result) : result) + " := ";
     if (oneReturn) {
         if (f.body[0].noValue) out += "()";
         else emitExpr(f.body[0].expr, out);
@@ -509,7 +641,7 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
         emitComments(f.bodyTrailing, "", out);  // no `do` block to hold them
         return;
     }
-    out += "Id.run do\n";
+    out += f.isIO ? "do\n" : "Id.run do\n";
     for (const std::string& p : f.mutParams) {  // a parameter that is assigned (§3.3)
         Type ty;
         for (const auto& param : f.params)
@@ -525,6 +657,9 @@ std::string emit(const TranslationUnit& unit) {
     std::string out;
     out += "-- generated by clean from " + unit.fileName + " — do not edit\n";
     out += "set_option autoImplicit false\n";
+    if (unit.needsHexOf)
+        out += "\n-- helper for printf `%x` / `%X` (main-spec §8.1)\n"
+               "def hexOf (n : Nat) : String := (Nat.toDigits 16 n).asString\n";
 
     size_t i = 0;
     while (i < unit.functions.size()) {
@@ -543,6 +678,10 @@ std::string emit(const TranslationUnit& unit) {
             emitFunction(unit.functions[i], unit.fileName, out);
         }
         out += "end\n";
+    }
+    for (const Stmt& st : unit.scripts) {  // file-scope output, after everything it may call (§8.2)
+        out += "\n";
+        emitScript(st, out);
     }
     if (!unit.trailingComments.empty()) {
         out += "\n";
