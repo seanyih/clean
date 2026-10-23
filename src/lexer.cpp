@@ -32,7 +32,7 @@ std::string trimBlank(const std::string& s) {
 
 const char* kSliceWhy =
     "clean translates scalar functions made of locals, assignments, `if`, "
-    "`switch` and `return` (see spec/impl-spec.md).";
+    "`switch`, loops (`for`, `while`, `do`) and `return` (see spec/impl-spec.md).";
 
 struct Lexer {
     const std::string& src;

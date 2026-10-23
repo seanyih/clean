@@ -2,7 +2,7 @@
 
 Extracted from main-spec §13.2. The severity, trigger and fix hint stay
 normative here; the **Implemented?** column is fact gathered from `src/`
-(state: slices 0–6, 2026-10-18). Update that column whenever a slice lands —
+(state: slices 0–9, 2026-10-20). Update that column whenever a slice lands —
 it is the at-a-glance view of what is left to build.
 
 Messages render exactly as main-spec §13.1 prescribes (implemented in
@@ -25,14 +25,17 @@ are still refused), W012, W013.
 **E000 — the build's placeholder, not a catalogue code.** Every refusal that
 has no permanent number yet is reported as E000. Two flavours:
 
-- *not translated in this slice* — `struct`, `enum`, `typedef`, `while`,
-  `goto`, … (the `kRefused` list in types.cpp and `kLaterStatements` in
-  parser.cpp). These retire as their slices land.
+- *not translated in this slice* — `struct`, `enum`, `typedef`, … (the
+  `kRefused` list in types.cpp). These retire as their slices land.
 - *permanent syntax/scope refusals* that will never arrive with a feature:
   unknown name or callee, arity mismatch, missing return, unreachable code,
   duplicate declaration/case/default, bare-block shadowing,
-  comparison-as-value, stray `break`, attribute on a prototype, `partial` on
-  only part of a `mutual` group (parser.cpp, check.cpp, toposort.cpp).
+  comparison-as-value, stray `break` / `continue` outside a loop, the two
+  loop-flattening shadow refusals (a general-`for` loop variable that hides
+  an outer name; a body local that shadows a name the injected step or the
+  re-tested `do … while` condition was checked with), attribute on a
+  prototype, `partial` on only part of a `mutual` group (parser.cpp,
+  check.cpp, toposort.cpp).
 
 Whether the second flavour should get its own numbers is open decision OD10
 in [open-decisions.md](open-decisions.md).
@@ -45,10 +48,10 @@ Status legend: ✅ emitted today (file that throws it) · ⚠️ partial ·
 | Code | Severity      | Trigger                                                                                              | Fix hint                                                                   | Implemented? (slices 0–6)                                                                          |
 | ---- | ------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | E101 | error         | pointer use outside §4.6                                                                             | use array parameter or return value                                        | ⚠️ pointers outside §4.6 ✅ (types.cpp `applyDeclarator`; `T *a` needs a length parameter, parser.cpp); mutation of a string by index ✅ (check.cpp); pointer arithmetic, `T **` and `void *` are refused here too. Writes to an array parameter are now translated (D20: the `void` single-array writer returns it); the writer refusals (non-`void` writer, two written arrays, non-variable write-back target) are E000 in check.cpp `findWriters` / the call-site rule |
-| E102 | error         | `goto` / unused label                                                                                | restructure with loops                                                     | ❌ `goto` lands in the E000 "not translated in this slice" refusal (parser.cpp `kLaterStatements`)  |
-| E103 | error         | assignment as expression, comma operator, unrecognised verification loop                             | split into statements                                                      | ⚠️ assignment-as-expression ✅ parser.cpp `parseExpr`; comma operator and verification loops not built |
+| E102 | error         | `goto` / unused label                                                                                | restructure with loops                                                     | ✅ parser.cpp `parseStmt` (`goto`, and `IDENT :` in statement position); with the loops slice the message's fix is real: `break`/`continue` exist |
+| E103 | error         | assignment as expression, comma operator, unrecognised verification loop                             | split into statements                                                      | ⚠️ assignment-as-expression ✅ parser.cpp `parseExpr`; the `for`-header comma ✅ parser.cpp `noComma`; a comma in other expression positions and verification loops are not built |
 | E104 | error         | `union`                                                                                              | use `bv(N)` and `bv_ext`/`bv_cat`                                           | ❌ E000 type refusal (types.cpp `kRefused`)                                                          |
-| E105 | error         | `switch` fall-through                                                                                | add `break` or merge cases                                                 | ✅ check.cpp `switchStmt`                                                                            |
+| E105 | error         | `switch` fall-through                                                                                | add `break` or merge cases                                                 | ✅ check.cpp `switchStmt` (a case ending in `continue` inside a loop counts as closed too)         |
 | E106 | error         | mutable global or `static` local                                                                     | pass state as parameter                                                    | ❌ file scope only takes functions; `static` is an E000 type refusal                                  |
 | E107 | error         | function pointer (v0.1)                                                                              | pass a named function (🟡)                                                 | ❌ syntax E000                                                                                        |
 | E108 | error         | `malloc`/`free`                                                                                      | fixed-size array                                                          | ❌ surfaces as the unknown-callee E000 in check.cpp                                                   |
@@ -58,7 +61,7 @@ Status legend: ✅ emitted today (file that throws it) · ⚠️ partial ·
 | E112 | error         | `sizeof`                                                                                             | pass the size explicitly                                                   | ❌ surfaces as the unknown-name E000 in check.cpp                                                     |
 | E113 | error         | threads/atomics                                                                                      | —                                                                          | ❌ not built                                                                                          |
 | E201 | error (synth) | recursion                                                                                            | unroll or bound                                                            | ❌ no `synth` profile exists; recursion is translated and Lean judges termination                      |
-| E202 | error (synth) | loop not reducible to range-for                                                                     | constant-bound `for`                                                       | ❌ no loops yet (`for`/`while` are E000 refusals)                                                     |
+| E202 | error (synth) | loop not reducible to range-for                                                                     | constant-bound `for`                                                       | ⚠️ loops are translated in the default `model` profile (range-`for`, general `for`, `while`, `do … while`); the `synth` profile that would reject the non-range ones does not exist yet |
 | E203 | error (synth) | float types                                                                                          | fixed-point with `bv(N)`                                                   | ❌ no `synth` profile (float types are translated now) |
 | E204 | error (synth) | `String`/`char *`                                                                                    | `bv(8)` arrays                                                             | ❌ no `synth` profile; no strings                                                                    |
 | E205 | error (synth) | I/O (`printf`, …)                                                                                    | mark function `NOSYNTH`                                                   | ❌ no `synth` profile (I/O itself translates: `IO`, §8) |

@@ -12,6 +12,13 @@
 //   * tests are Lean propositions: `==` → `=`, `!=` → `≠`, `&&` → `∧`,
 //     `||` → `∨`, `!` → `¬`, and a bare number `x` in a test means `x ≠ 0`;
 //   * a bare `{ … }` block is flattened into its parent (Lean's nested `do` is not a scope);
+//   * loops (main-spec §6): `while (c) …` is `while c' do …`, `do … while (c);`
+//     is `repeat … unless c' do break`, and a `for` that check.cpp marked a
+//     range-for is `for i in [A:B] do` (`<=` widens the bound by one, a step
+//     `+= K` becomes `[A:B:K]`; an `int` loop variable is rebound to its C
+//     type at the top of the body, `let i : Int := ↑i`); general `for`s were
+//     rewritten into `while`s by check.cpp, so only range-fors arrive here;
+//     `break`/`continue` print as themselves;
 //   * recursive functions are printed as they are; mutually recursive ones
 //     share a `mutual … end` block (set up by toposort.cpp);
 //   * a `void` writer (OD11 c, decision D20) returns the array parameter it
@@ -33,6 +40,7 @@
 
 #include "emitter.h"
 
+#include <cstdlib>
 #include <vector>
 
 #include "types.h"
@@ -300,6 +308,53 @@ const Stmt* lastReal(const std::vector<Stmt>& list) {
     return s;
 }
 
+// ---- loops (main-spec §6) -----------------------------------------------------
+
+// The expression under the implicit conversions check.cpp inserted (the
+// initialiser of an `int` loop variable is typed as an `Int` even though the
+// range reads the `Nat` beneath).
+const Expr& peeled(const Expr& e) {
+    const Expr* p = &e;
+    while (p->kind == Expr::Kind::Cast && p->implicit) p = &p->kids[0];
+    return *p;
+}
+
+// Value of an integer literal (`7`, `0x1F`, `0b11`), for the `<=` bound.
+unsigned long long literalOf(const std::string& t) {
+    if (t.size() > 2 && t[0] == '0' && (t[1] == 'b' || t[1] == 'B'))
+        return std::strtoull(t.c_str() + 2, nullptr, 2);
+    return std::strtoull(t.c_str(), nullptr, 0);
+}
+
+// One range bound as a Lean `Nat` term: a numeral as written, an `unsigned`/
+// `uintN_t` expression through its `.toNat` (types.cpp's conversion).
+std::string rangeBoundText(const Expr& e) {
+    const Expr& b = peeled(e);
+    std::string t;
+    emitExpr(b, t);
+    if (b.type.kind == Type::Kind::UInt) return convert(b.type, Type::of(Type::Kind::Nat), t, nullptr, nullptr);
+    return t;
+}
+
+// `for i in [A:B] do` / `for i in [A:B:K] do` (§6.1). `<=` widens the upper
+// bound by one; a literal bound is computed, an expression spelled `B + 1`.
+std::string rangeText(const Stmt& s) {
+    std::string hi = rangeBoundText(s.expr.kids[1]);
+    if (s.inclusive) {
+        const Expr& b = peeled(s.expr.kids[1]);
+        if (b.kind == Expr::Kind::IntLit)
+            hi = std::to_string(literalOf(b.text) + 1);
+        else
+            hi += " + 1";
+    }
+    std::string out = "[" + rangeBoundText(s.init[0].expr) + ":" + hi;
+    if (!s.step.empty()) {  // `i += K`: the range's third part. K = 1 is the default.
+        const std::string& k = s.step[0].expr.kids[1].text;
+        if (literalOf(k) != 1) out += ":" + k;
+    }
+    return out + "]";
+}
+
 void emitIf(const Stmt& s, int level, const std::string& wret, bool yield, std::string& out) {
     const Stmt* cur = &s;
     out += pad(level) + "if ";
@@ -563,6 +618,41 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
         case Stmt::Kind::Switch:
             emitSwitch(s, level, wret, !wret.empty() && &s == last, out);
             break;
+        case Stmt::Kind::While:
+            out += pad(level) + "while ";
+            emitCond(s.expr, out);
+            out += " do\n";
+            emitStmts(s.body, level + 1, wret, false, out, &s.bodyTrailing);
+            break;
+        case Stmt::Kind::DoWhile:
+            // C tests after the body: repeat it, exit when the test fails (§6).
+            // The `unless … break` is the body's last statement, inside the repeat.
+            out += pad(level) + "repeat\n";
+            emitStmts(s.body, level + 1, wret, false, out, &s.bodyTrailing);
+            out += pad(level + 1) + "unless ";
+            emitCond(s.expr, out);
+            out += " do\n" + pad(level + 2) + "break\n";
+            break;
+        case Stmt::Kind::For: {  // only range-fors are left (check.cpp rewrote the rest)
+            const Stmt& var = s.init[0];
+            out += pad(level) + "for " + var.name + " in " + rangeText(s) + " do\n";
+            const int inner = level + 1;
+            if (var.type.kind == Type::Kind::Int) {
+                // the range yields `Nat`; the body was checked with `i : Int`,
+                // so rebind it (main-spec §6.1)
+                out += pad(inner) + "let " + var.name + " : Int := " +
+                       convert(Type::of(Type::Kind::Nat), Type::of(Type::Kind::Int), var.name,
+                               nullptr, nullptr) + "\n";
+            }
+            emitStmts(s.body, inner, wret, false, out, &s.bodyTrailing);
+            break;
+        }
+        case Stmt::Kind::Break:
+            out += pad(level) + "break\n";  // ends the innermost loop (the parser checked)
+            break;
+        case Stmt::Kind::Continue:
+            out += pad(level) + "continue\n";
+            break;
         case Stmt::Kind::Block:
             // Lean's nested `do` is not a scope (its `let`s leak), so a bare C block is
             // flattened; check.cpp refused the blocks where that would change meaning.
@@ -570,8 +660,6 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
             emitList(s.body, level, wret, last, out);
             emitComments(s.bodyTrailing, pad(level), out);
             break;
-        case Stmt::Kind::Break:
-            break;  // stripped by the parser
         }
     }
 }

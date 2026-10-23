@@ -1,0 +1,15 @@
+W001  loops.c:9:1  `int sum_ints(…)` is an `int`: Lean's `Int` is unbounded  (+7 more in this file)
+      why:  C's `int` wraps at 32 bits; clean maps the `int` family to `Int` and emulates nothing (D4).
+      fix:  use `int32_t` (or another `intN_t`) where a fixed width is meant.
+W010  loops.c:12:14  `a[i]` panics when the index is out of range  (+1 more in this file)
+      why:  it is `a[i]!`, which panics at run time.
+      fix:  guard the index with a comparison (the `--index=proof` option of main-spec §10 is not built yet).
+W009  loops.c:12:16  a signed value is converted to `unsigned`; negatives become 0  (+1 more in this file)
+      why:  Lean's `Int.toNat` clamps negative numbers to 0; C wraps modulo 2^N.
+      fix:  make sure the value is non-negative, or keep it signed.
+W002  loops.c:22:9  `-` on `unsigned` stops at 0
+      why:  Lean's `Nat` subtraction is 0 when the result would be negative; C wraps around.
+      fix:  guard it with a comparison, or use `int` / `uint32_t` (the `--unsigned=int` option of main-spec §4.1 is not built yet).
+W005  loops.c:23:9  `/` by a value that may be zero
+      why:  in Lean `x / 0` is 0 and `x % 0` is `x`; in C it is undefined.
+      fix:  guard the divisor.

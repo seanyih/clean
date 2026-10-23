@@ -18,8 +18,15 @@
 //              |  IDENT ('++' | '--') ';'
 //              |  'if' '(' expr ')' body [ 'else' body ]
 //              |  'switch' '(' expr ')' '{' group* '}'
+//              |  'while' '(' expr ')' body
+//              |  'do' body 'while' '(' expr ')' ';'
+//              |  'for' '(' init? ';' expr? ';' step? ')' body     (main-spec §6.1)
 //              |  print
-//              |  'return' expr ';'  |  'break' ';'  |  block  |  ';'
+//              |  'return' expr ';'  |  'break' ';'  |  'continue' ';'
+//              |  block  |  ';'
+//   init      :=  a local declaration, an assignment or a call (no comma lists:
+//                 C's comma operator is ⛔, E103); each part eats its own ';'
+//   step      :=  an assignment, '++'/'--' IDENT or a call (no trailing ';')
 //   print     :=  'printf' '(' STRINGLIT (',' expr)* ')' ';'     (also at file scope: §8.2)
 //              |  'fprintf' '(' ('stderr'|'stdout') ',' STRINGLIT (',' expr)* ')' ';'
 //              |  ('puts' | 'putchar') '(' expr ')' ';'
@@ -34,8 +41,8 @@
 // stream first, so they can sit anywhere C allows one and never affect what
 // parses. Each is re-attached by where it sat: above the statement it
 // precedes or sits inside; a header region (the condition of an `if` or
-// `switch`, the signature of a definition) attaches to the `if` / `switch` /
-// definition itself; the ones before a closing `}` stay inside the block they
+// `switch`, the whole header of a `while`/`do`/`for`, the signature of a
+// definition) attaches to the `if` / `switch` / loop / definition itself; the ones before a closing `}` stay inside the block they
 // ended (body end, branch end, case group end); comments between groups land
 // on whatever reads next (the next case group, the next statement); the ones
 // after the last definition end the file. The odd in-signature spots (inside

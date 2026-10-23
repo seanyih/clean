@@ -1,4 +1,17 @@
 // check.cpp — implementation of check.h.
+//
+// Names, arities, scopes, types, and the loop decision. `for` (main-spec §6.1)
+// is decided here because only the types say whether a header is a range-for:
+// `for (T i = A; i < B; i++)` with a constant or unsigned/`Nat`-valued `A`/`B`
+// and a body that leaves `i` alone becomes `for i in [A:B] do`; any other
+// header is rewritten into the general form — initialiser before a `while`,
+// the step at the end of the body and before every `continue` of that loop
+// (a `Block` around both, so the emitted scope is one flat `do` sequence).
+// The rewrite must not change which names things refer to, so two tree walks
+// refuse the shapes where it would: a loop variable that hides an outer name
+// (the flattened `let` would shadow it for the rest of the block), and a body
+// local that shadows a name the injected step (or the re-tested `do … while`
+// condition) was checked with.
 
 #include "check.h"
 
@@ -49,6 +62,150 @@ bool returnsOnAllPaths(const std::vector<Stmt>& list) {
     for (const Stmt& s : list)
         if (stmtReturns(s)) return true;
     return false;
+}
+
+// ---- loops (main-spec §6.1) --------------------------------------------------
+
+// The names an expression reads: its identifiers, not its callee names (a
+// local that shadows a function is caught where the call is checked).
+void freeIdents(const Expr& e, std::set<std::string>& out) {
+    if (e.kind == Expr::Kind::Ident) out.insert(e.text);
+    for (const Expr& k : e.kids) freeIdents(k, out);
+}
+
+// Does the list (or anything nested in it, other loops' parts included) write
+// one of `names`? A write is a whole-variable assignment, an element write, or
+// a call to a writer (D20) passing the name as its written argument — the
+// call statement re-assigns what it passed. §6.1 forbids writing the loop
+// variable of a range-for, and a range-for also needs the names its bounds
+// read to stay untouched: the range freezes them at loop entry, while C
+// re-tests the condition every iteration.
+bool writesAny(const std::vector<Stmt>& list, const std::set<std::string>& names,
+               const std::map<std::string, int>& writers) {
+    for (const Stmt& s : list) {
+        if (s.kind == Stmt::Kind::Assign && names.count(s.name)) return true;
+        if (s.kind == Stmt::Kind::CallStmt) {
+            auto w = writers.find(s.expr.text);
+            if (w != writers.end() && w->second < (int)s.expr.kids.size()) {
+                const Expr& arg = s.expr.kids[w->second];
+                if (arg.kind == Expr::Kind::Ident && names.count(arg.text)) return true;
+            }
+        }
+        if (writesAny(s.init, names, writers) || writesAny(s.step, names, writers)) return true;
+        if (writesAny(s.body, names, writers) || writesAny(s.elseBody, names, writers)) return true;
+        for (const Case& c : s.cases)
+            if (writesAny(c.body, names, writers)) return true;
+    }
+    return false;
+}
+
+// One of the names `names` is redeclared by `shadowed` (both sets intersect).
+bool shadowsAny(const std::set<std::string>& names, const std::set<std::string>& shadowed,
+                std::string& which) {
+    for (const std::string& n : names)
+        if (shadowed.count(n)) {
+            which = n;
+            return true;
+        }
+    return false;
+}
+
+// The general `for` writes its step (a `do … while` its re-tested condition)
+// where the body can have redeclared one of the names it was checked with, so
+// the answer is a walk, not a glance: it tracks which of `names` each list
+// redeclares (a declaration shadows to the end of its list, and into the
+// lists nested after it, like a C scope), and reports the `continue`s and the
+// body end — the points where the statement gets injected — that no longer
+// see the original binding. `continue`s and ends of *other* loops do not
+// count: they get nothing injected, their own step/condition did.
+struct InjectScan {
+    std::set<std::string> names;
+    bool bad = false;
+    Loc loc;
+    std::string which;
+
+    void walk(const std::vector<Stmt>& list, std::set<std::string> shadowed, bool injectable,
+              bool isTop, Loc end) {
+        for (const Stmt& s : list) {
+            if (s.kind == Stmt::Kind::Decl && names.count(s.name)) shadowed.insert(s.name);
+            if (s.kind == Stmt::Kind::Continue && injectable &&
+                shadowsAny(names, shadowed, which)) {
+                bad = true;
+                loc = s.loc;
+                return;
+            }
+            switch (s.kind) {
+            case Stmt::Kind::If:
+                walk(s.body, shadowed, injectable, false, end);
+                walk(s.elseBody, shadowed, injectable, false, end);
+                break;
+            case Stmt::Kind::Block:
+                walk(s.body, shadowed, injectable, false, end);
+                break;
+            case Stmt::Kind::Switch:
+                for (const Case& c : s.cases) walk(c.body, shadowed, injectable, false, end);
+                break;
+            case Stmt::Kind::While:
+            case Stmt::Kind::DoWhile:
+                walk(s.body, shadowed, false, false, end);
+                break;
+            case Stmt::Kind::For: {
+                std::set<std::string> inner = shadowed;
+                if (!s.init.empty() && s.init[0].kind == Stmt::Kind::Decl &&
+                    names.count(s.init[0].name))
+                    inner.insert(s.init[0].name);  // shadows for this loop's body
+                walk(s.body, inner, false, false, end);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        if (isTop && shadowsAny(names, shadowed, which)) {  // the statement lands at the body's end
+            bad = true;
+            loc = end;
+        }
+    }
+};
+
+// A copy of the step before every `continue` that binds this loop — everywhere
+// in the body except inside another loop (whose `continue`s are its own). The
+// caller appends the step at the very end of the top-level body itself.
+void injectStep(std::vector<Stmt>& list, const Stmt& step) {
+    for (size_t k = 0; k < list.size(); ++k) {
+        Stmt& s = list[k];
+        switch (s.kind) {
+        case Stmt::Kind::Continue:
+            list.insert(list.begin() + (long)k, step);
+            ++k;  // step over the copy
+            break;
+        case Stmt::Kind::If:
+            injectStep(s.body, step);
+            injectStep(s.elseBody, step);
+            break;
+        case Stmt::Kind::Block:
+            injectStep(s.body, step);
+            break;
+        case Stmt::Kind::Switch:
+            for (Case& c : s.cases) injectStep(c.body, step);
+            break;
+        default:
+            break;  // While/DoWhile/For: their `continue`s bind them, not this loop
+        }
+    }
+}
+
+// The last statement of the flattened stream (bare blocks splice open), for
+// "the body already ends in `continue`" — the step appended after it could
+// never run.
+bool endsInContinue(const std::vector<Stmt>& list) {
+    if (list.empty()) return false;
+    const Stmt* s = &list.back();
+    while (s->kind == Stmt::Kind::Block) {
+        if (s->body.empty()) return false;
+        s = &s->body.back();
+    }
+    return s->kind == Stmt::Kind::Continue;
 }
 
 // Value of an integer-literal case label (`7`, `0x1F`, `0b11`, `-1`).
@@ -151,8 +308,22 @@ struct WriterScan {
             case Stmt::Kind::Block:
                 scope(s.body);
                 break;
+            case Stmt::Kind::For:
+                // one scope for the whole loop: the variable the initialiser
+                // declares is visible in the step and the body (check.cpp's
+                // For does the same).
+                scopes.emplace_back();
+                scan(s.init);
+                scan(s.step);
+                scan(s.body);
+                scopes.pop_back();
+                break;
+            case Stmt::Kind::While:
+            case Stmt::Kind::DoWhile:
+                scope(s.body);
+                break;
             default:
-                break;  // Return, Break: nothing to gather
+                break;  // Return, Break, Continue: nothing to gather
             }
         }
     }
@@ -370,7 +541,18 @@ struct Checker {
     }
 
     void coerce(Expr& e, Type target) {
-        if (e.type == target || isLiteral(e.type)) return;
+        if (e.type == target) return;
+        if (isLiteral(e.type)) {
+            // a negative literal adapting to an unsigned type: the same
+            // refusal `valueAs` gives `x = -1`, for the ones nested in
+            // arithmetic (`x += -2`, `n % (-2)`, a shift count, a comparison…)
+            if (e.kind == Expr::Kind::UnaryNeg && e.kids[0].kind == Expr::Kind::IntLit &&
+                (target.kind == Type::Kind::Nat || target.kind == Type::Kind::UInt))
+                fail(file, e.loc, "a negative value for `" + cName(target) + "`",
+                     "Lean's `" + leanName(target) + "` cannot hold it.",
+                     "use a non-negative value, or an `int`/`intN_t` type.");
+            return;
+        }
         std::string why, fix;
         if (convert(e.type, target, "x", &why, &fix).empty())
             fail(file, e.loc, "cannot convert `" + cName(e.type) + "` to `" + cName(target) + "`", why, fix);
@@ -618,6 +800,194 @@ struct Checker {
         scopes.pop_back();
     }
 
+    // `name = e;` / `name[i] = e;` — the Assign case of `stmts`, also the
+    // shape of a `for` header part.
+    void assignStmt(Stmt& s) {
+        Var target;
+        if (lookup(s.name, target)) {
+            Type t = target.type;
+            for (Expr& idx : s.indices) {  // `a[i][j] = v`: walk down to the element type
+                if (t.kind == Type::Kind::String)
+                    failCode("E101", file, s.loc, "mutation of a string by index",
+                             "Lean strings are immutable (main-spec §4.3).",
+                             "use an `Array Char`, or `uint8_t`/`bv(N)` arrays for byte buffers.");
+                if (t.kind != Type::Kind::Array)
+                    fail(file, s.loc, "indexing `" + s.name + "`, which is not an array",
+                         "only arrays can be indexed.", "index an array.");
+                valueAs(idx, Type::of(Type::Kind::Nat));
+                t = t.elem();
+            }
+            if (!s.indices.empty() && !target.decl &&
+                (fn.writerParam < 0 || fn.params[(size_t)fn.writerParam].second != s.name))
+                // OD11 (c): a write to an array parameter is legal exactly in a writer,
+                // through its one written parameter. findWriters refuses every other
+                // shape before this point, so this is belt and braces.
+                fail(file, s.loc, "`" + s.name + "` is an array parameter and is written to",
+                     "C would change the caller's array. clean gives the modified array "
+                     "back instead: a `void` function that writes exactly one array "
+                     "parameter returns it (see design-decisions.md, D20) — this function "
+                     "is not one.",
+                     "make the function `void` and write to one array parameter, or copy "
+                     "into a local array.");
+            if (s.indices.empty() && t.kind == Type::Kind::Array)
+                fail(file, s.loc, "assignment to the whole array `" + s.name + "`",
+                     "C rejects it too.", "assign the elements one by one.");
+            valueAs(s.expr, t);
+        }
+        markAssigned(s.name, s.loc);  // refuses unknown names and functions
+    }
+
+    // `f(args);` — the CallStmt case of `stmts`, also a `for` header part.
+    void callStmt(Stmt& s) {
+        s.expr.type = valueType(s.expr);  // name, arity and arguments
+        if (s.expr.type.kind != Type::Kind::Unit)
+            fail(file, s.expr.loc, "the result of `" + s.expr.text + "(…)` is discarded",
+                 "functions are pure in Lean; a discarded value does nothing "
+                 "(effects arrive with `printf` and IO).",
+                 "use the value: `T r = " + s.expr.text + "(…);`.");
+        auto w = writers.find(s.expr.text);
+        if (w != writers.end()) {  // the callee is a writer: the array comes back (OD11 c)
+            Expr& arg = s.expr.kids[(size_t)w->second];
+            if (arg.kind != Expr::Kind::Ident)
+                fail(file, arg.loc, "`" + s.expr.text + "(…)` writes the array it is passed, "
+                     "but that argument is not a whole variable",
+                     "the modified array comes back as the return value, so it must be "
+                     "assigned back to whatever was passed — only a variable can receive it.",
+                     "pass an array variable; for a row of a 2D array, copy it out first "
+                     "and copy it back after the call.");
+            markAssigned(arg.text, arg.loc);  // `let mut` parameter / marks the local's Decl
+            s.writeBack = arg.text;
+        }
+    }
+
+    // ---- loops (main-spec §6) ---------------------------------------------------
+
+    // True when the expression contains a call to an `IO` function (its
+    // `io` flag is set by the typing pass).
+    static bool callsIO(const Expr& e) {
+        if (e.kind == Expr::Kind::Call && e.io) return true;
+        for (const Expr& k : e.kids)
+            if (callsIO(k)) return true;
+        return false;
+    }
+
+    // A bound a range can use (§6.1): a non-negative integer literal, or an
+    // expression whose own type is `unsigned`/`uintN_t`. A bound of another
+    // type — an `int`-valued one included, §14.2 — falls to the general form,
+    // as does a bound that does I/O (a range evaluates its bounds once, and
+    // C could not write them anyway). The expression must already be typed.
+    static bool rangeBound(const Expr& e) {
+        if (e.kind == Expr::Kind::IntLit) return true;
+        if (e.kind == Expr::Kind::Cast) return false;  // a written cast: its value is up to C
+        return e.type.kind == Type::Kind::Nat || e.type.kind == Type::Kind::UInt;
+    }
+
+    // `for (…)` (§6.1): decide range-for vs the general form.
+    void forStmt(Stmt& s) {
+        // ---- the pattern, piece by piece; any miss falls to the general form ----
+        bool ok = s.init.size() == 1 && s.init[0].kind == Stmt::Kind::Decl &&
+                  s.init[0].dims.empty() &&
+                  (s.init[0].type.kind == Type::Kind::Int ||
+                   s.init[0].type.kind == Type::Kind::Nat ||
+                   s.init[0].type.kind == Type::Kind::UInt);
+        if (ok) {  // `i < B` or `i <= B`, the loop variable on the left
+            ok = s.expr.kind == Expr::Kind::Cmp && (s.expr.text == "<" || s.expr.text == "<=") &&
+                 s.expr.kids[0].kind == Expr::Kind::Ident &&
+                 s.expr.kids[0].text == s.init[0].name;
+        }
+        if (ok) ok = !callsIO(s.init[0].expr) && !callsIO(s.expr.kids[1]);
+        if (ok) {
+            value(s.init[0].expr);  // the low bound's own type
+            ok = rangeBound(s.init[0].expr);
+        }
+        if (ok) {
+            value(s.expr.kids[1]);  // the high bound's own type
+            ok = rangeBound(s.expr.kids[1]);
+        }
+        if (ok) {  // no step, or `i` on the left of `+` with a literal K ≥ 1
+            ok = s.step.empty() ||
+                 (s.step[0].kind == Stmt::Kind::Assign && s.step[0].indices.empty() &&
+                  s.step[0].name == s.init[0].name &&
+                  s.step[0].expr.kind == Expr::Kind::Binary && s.step[0].expr.text == "+" &&
+                  s.step[0].expr.kids[0].kind == Expr::Kind::Ident &&
+                  s.step[0].expr.kids[0].text == s.init[0].name &&
+                  s.step[0].expr.kids[1].kind == Expr::Kind::IntLit &&
+                  labelValue(s.step[0].expr.kids[1]) >= 1);
+        }
+        if (ok) {  // §6.1: the body leaves the loop variable alone — and, because
+            // the range freezes its bounds at entry while C re-tests them every
+            // iteration, it writes nothing the bounds read either (§6.1.2's
+            // `while` is the exact form for those loops)
+            std::set<std::string> header{s.init[0].name};
+            freeIdents(s.init[0].expr, header);
+            freeIdents(s.expr.kids[1], header);
+            ok = !writesAny(s.body, header, writers);
+        }
+
+        if (ok) {  // ---- range-for: `for i in [A:B] do`, the header consumed ----
+            s.range = true;
+            s.inclusive = s.expr.text == "<=";
+            declStmt(s.init[0]);  // the declaration's own conversions (§5.3); the emitter
+                                  // peels them off the low bound — the range reads the Nat
+            // The range yields `Nat`. An `int` loop variable keeps its C type:
+            // the emitter rebinds it (`let i : Int := ↑i`, §6.1); `unsigned` and
+            // `uintN_t` see the `Nat` itself, converting at use sites (§14.2).
+            scopes.emplace_back();
+            bare.push_back(false);
+            scopes.back()[s.init[0].name] = Var{
+                nullptr, s.init[0].type.kind == Type::Kind::Int ? Type::of(Type::Kind::Int)
+                                                               : Type::of(Type::Kind::Nat)};
+            scoped(s.body);
+            bare.pop_back();
+            scopes.pop_back();
+            return;
+        }
+
+        // ---- general form: `{ init; while (cond) { body; step } }` ----
+        if (!s.init.empty() && s.init[0].kind == Stmt::Kind::Decl) {
+            Var outer;
+            if (lookup(s.init[0].name, outer))
+                fail(file, s.init[0].loc,
+                     "the loop variable `" + s.init[0].name + "` hides an outer variable of the same name",
+                     "the general `for` is flattened into its parent block, so the outer `" +
+                         s.init[0].name + "` would be wrongly replaced after the loop.",
+                     "rename the loop variable.");
+        }
+        if (!s.step.empty()) {  // the injected step must still see the names it was checked with
+            InjectScan scan;
+            const Stmt& st = s.step[0];
+            scan.names.insert(st.name);
+            for (const Expr& ix : st.indices) freeIdents(ix, scan.names);
+            freeIdents(st.expr, scan.names);
+            scan.walk(s.body, {}, true, true, s.loc);
+            if (scan.bad)
+                fail(file, scan.loc,
+                     "`" + scan.which + "` is redeclared where the for step must run",
+                     "the general `for` repeats its step at the end of the body and before "
+                     "every `continue`, where the redeclared `" + scan.which +
+                         "` would shadow the one the step was checked with.",
+                     "rename the local, or drop the `continue` between them.");
+        }
+        Stmt blk;
+        blk.kind = Stmt::Kind::Block;
+        blk.loc = s.loc;
+        blk.comments = std::move(s.comments);
+        Stmt w;
+        w.kind = Stmt::Kind::While;
+        w.loc = s.loc;
+        w.expr = std::move(s.expr);
+        w.body = std::move(s.body);
+        w.bodyTrailing = std::move(s.bodyTrailing);
+        if (!s.step.empty()) {
+            injectStep(w.body, s.step[0]);
+            if (!endsInContinue(w.body)) w.body.push_back(s.step[0]);  // a trailing `continue` already ran it
+        }
+        if (!s.init.empty()) blk.body.push_back(std::move(s.init[0]));
+        blk.body.push_back(std::move(w));
+        s = std::move(blk);
+        scoped(s.body);  // one scope for the loop variable; the `while` case takes it from there
+    }
+
     void switchStmt(Stmt& s) {
         Type st = value(s.expr);
         if (st.kind != Type::Kind::Int && st.kind != Type::Kind::Nat && st.kind != Type::Kind::Literal)
@@ -640,10 +1010,12 @@ struct Checker {
                          "C rejects it too.", "remove or change one of the labels.");
             scoped(c.body);
             bool last = k + 1 == s.cases.size();
-            if (!last && !c.endsInBreak && !returnsOnAllPaths(c.body))
+            // a case that ends in `break` (stripped by the parser), `return` or —
+            // inside a loop — `continue` does not fall through into the next one
+            if (!last && !c.endsInBreak && !returnsOnAllPaths(c.body) && !endsInContinue(c.body))
                 failCode("E105", file, c.loc, "switch case falls through into the next one",
                          "Lean's `match` arms never fall through, and emulating it would duplicate code.",
-                         "end the case with `break;` or `return`, or merge the labels "
+                         "end the case with `break;`, `continue;` or `return`, or merge the labels "
                          "(`case 1: case 2:`).");
         }
     }
@@ -798,67 +1170,41 @@ struct Checker {
                 }
                 scopes.back()[s.name] = Var{&s, s.type};
                 break;
-            case Stmt::Kind::Assign: {
-                Var target;
-                if (lookup(s.name, target)) {
-                    Type t = target.type;
-                    for (Expr& idx : s.indices) {  // `a[i][j] = v`: walk down to the element type
-                        if (t.kind == Type::Kind::String)
-                            failCode("E101", file, s.loc, "mutation of a string by index",
-                                     "Lean strings are immutable (main-spec §4.3).",
-                                     "use an `Array Char`, or `uint8_t`/`bv(N)` arrays for byte buffers.");
-                        if (t.kind != Type::Kind::Array)
-                            fail(file, s.loc, "indexing `" + s.name + "`, which is not an array",
-                                 "only arrays can be indexed.", "index an array.");
-                        valueAs(idx, Type::of(Type::Kind::Nat));
-                        t = t.elem();
-                    }
-                    if (!s.indices.empty() && !target.decl &&
-                        (fn.writerParam < 0 || fn.params[(size_t)fn.writerParam].second != s.name))
-                        // OD11 (c): a write to an array parameter is legal exactly in a writer,
-                        // through its one written parameter. findWriters refuses every other
-                        // shape before this point, so this is belt and braces.
-                        fail(file, s.loc, "`" + s.name + "` is an array parameter and is written to",
-                             "C would change the caller's array. clean gives the modified array "
-                             "back instead: a `void` function that writes exactly one array "
-                             "parameter returns it (see design-decisions.md, D20) — this function "
-                             "is not one.",
-                             "make the function `void` and write to one array parameter, or copy "
-                             "into a local array.");
-                    if (s.indices.empty() && t.kind == Type::Kind::Array)
-                        fail(file, s.loc, "assignment to the whole array `" + s.name + "`",
-                             "C rejects it too.", "assign the elements one by one.");
-                    valueAs(s.expr, t);
-                }
-                markAssigned(s.name, s.loc);  // refuses unknown names and functions
+            case Stmt::Kind::Assign:
+                assignStmt(s);
                 break;
-            }
-            case Stmt::Kind::CallStmt: {
-                s.expr.type = valueType(s.expr);  // name, arity and arguments
-                if (s.expr.type.kind != Type::Kind::Unit)
-                    fail(file, s.expr.loc, "the result of `" + s.expr.text + "(…)` is discarded",
-                         "functions are pure in Lean; a discarded value does nothing "
-                         "(effects arrive with `printf` and IO).",
-                         "use the value: `T r = " + s.expr.text + "(…);`.");
-                auto w = writers.find(s.expr.text);
-                if (w != writers.end()) {  // the callee is a writer: the array comes back (OD11 c)
-                    Expr& arg = s.expr.kids[(size_t)w->second];
-                    if (arg.kind != Expr::Kind::Ident)
-                        fail(file, arg.loc, "`" + s.expr.text + "(…)` writes the array it is passed, "
-                             "but that argument is not a whole variable",
-                             "the modified array comes back as the return value, so it must be "
-                             "assigned back to whatever was passed — only a variable can receive it.",
-                             "pass an array variable; for a row of a 2D array, copy it out first "
-                             "and copy it back after the call.");
-                    markAssigned(arg.text, arg.loc);  // `let mut` parameter / marks the local's Decl
-                    s.writeBack = arg.text;
-                }
+            case Stmt::Kind::CallStmt:
+                callStmt(s);
                 break;
-            }
             case Stmt::Kind::If:
                 cond(s.expr);
                 scoped(s.body);
                 scoped(s.elseBody);
+                break;
+            case Stmt::Kind::While:
+                cond(s.expr);
+                scoped(s.body);
+                break;
+            case Stmt::Kind::DoWhile: {
+                // the condition is re-tested at the end of every iteration, inside
+                // the body's do-block; a body local shadowing one of its names
+                // would change what it reads (C keeps the outer binding)
+                InjectScan scan;
+                freeIdents(s.expr, scan.names);
+                scan.walk(s.body, {}, false, true, s.loc);
+                if (scan.bad)
+                    fail(file, scan.loc,
+                         "`" + scan.which + "` is redeclared where the `do … while` condition is re-tested",
+                         "the condition lands at the end of the body, inside the scope of the "
+                         "redeclared `" + scan.which + "`, so it would read the local instead "
+                         "of the variable C sees.",
+                         "rename the local.");
+                scoped(s.body);
+                cond(s.expr);
+                break;
+            }
+            case Stmt::Kind::For:
+                forStmt(s);
                 break;
             case Stmt::Kind::Return:
                 if (fn.retType.kind == Type::Kind::Unit) {
@@ -879,7 +1225,8 @@ struct Checker {
                 scoped(s.body, true);
                 break;
             case Stmt::Kind::Break:
-                break;  // the parser already rejected the stray ones
+            case Stmt::Kind::Continue:
+                break;  // `break`/`continue` legality is the parser's checkJumps
             case Stmt::Kind::Print:
                 printStmt(s);
                 break;

@@ -145,6 +145,13 @@ struct Linter {
     void stmts(const std::vector<Stmt>& list) {
         for (const Stmt& s : list) {
             if (s.kind == Stmt::Kind::Decl) type(s.type, s.loc, cName(s.type) + " " + s.name);
+            // a range-for's loop variable is consumed by the range, but is still
+            // an `int`/`unsigned` in the C file — the general form's initialiser
+            // is an ordinary Decl and lints the same way
+            if (s.kind == Stmt::Kind::For && s.range && !s.init.empty() &&
+                s.init[0].kind == Stmt::Kind::Decl)
+                type(s.init[0].type, s.init[0].loc,
+                     cName(s.init[0].type) + " " + s.init[0].name);
             if (s.kind == Stmt::Kind::Assign && !s.indices.empty())
                 report("W010", s.loc, "`" + s.name + "[i] = v` ignores an out-of-range index",
                        "it is `a.set! i v`, which does nothing when `i` is out of range "

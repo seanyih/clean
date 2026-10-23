@@ -2,8 +2,13 @@
 //
 // Recursive descent over the grammar in parser.h. It only builds the tree and
 // refuses what it cannot build; whether names exist, arities match and every
-// path returns is check.cpp's job. Two small desugarings happen here because
-// they are purely syntactic: `x += e` → `x = x + e`, and `x++;` → `x = x + 1`.
+// path returns is check.cpp's job. Small desugarings happen here because they
+// are purely syntactic: `x += e` → `x = x + e`, `x++;` → `x = x + 1`, and a
+// `for` header with no condition gets a literal `true`. Loops are parsed here
+// in their C shape (`While` / `DoWhile` / `For`); which `for` becomes a Lean
+// range and which one becomes a `while` is check.cpp's decision (it needs the
+// types). `break`/`continue` legality is checked here too: the walk knows
+// only the shape of the tree, which is all the question needs.
 //
 // Comments are not grammar: before parsing, `parse` lifts them out of the
 // token stream, each remembering the position it sat at, so a comment can
@@ -22,8 +27,8 @@ namespace {
 
 const char* kSliceWhy =
     "clean translates integer functions built from locals, assignments, `if`, "
-    "`switch` and `return`; other statements and types arrive slice by slice "
-    "(see spec/impl-spec.md).";
+    "`switch`, loops (`for`, `while`, `do`) and `return`; other statements and "
+    "types arrive slice by slice (see spec/impl-spec.md).";
 
 // Names Lean reserves. Not exhaustive; it exists so a collision fails here,
 // loudly, instead of inside Lean (main-spec D8).
@@ -41,9 +46,6 @@ const std::set<std::string> kLeanKeywords = {
 bool isPrintName(const std::string& w) {
     return w == "printf" || w == "puts" || w == "putchar" || w == "fprintf";
 }
-
-// Statement keywords that come in a later slice.
-const std::set<std::string> kLaterStatements = {"while", "for", "do", "goto", "continue"};
 
 [[noreturn]] void failCode(const char* code, const std::string& file, Loc loc,
                            const std::string& what, const std::string& why,
@@ -463,7 +465,8 @@ struct Parser {
     }
 
     // `x = e;`  `x += e;`  `x++;`  and the element forms `a[i][j] = e;` `a[i] += e;` `a[i]++;`
-    Stmt parseAssignment() {
+    // `semi` = the statement form wants its `;`; a `for` step does not (a `)` follows).
+    Stmt parseAssignment(bool semi) {
         Token name = toks[i++];
         std::vector<Expr> indices;
         while (isPunct("[")) {
@@ -494,7 +497,7 @@ struct Parser {
         if (isPunct("++") || isPunct("--")) {
             std::string op = peek().text.substr(0, 1);
             ++i;
-            expectPunct(";", "after `" + name.text + op + op + "`");
+            if (semi) expectPunct(";", "after `" + name.text + op + op + "`");
             Expr one;
             one.kind = Expr::Kind::IntLit;
             one.text = "1";
@@ -510,7 +513,7 @@ struct Parser {
         std::string op = peek().text;
         ++i;
         Expr rhs = parseExpr();
-        expectPunct(";", "after the assignment to `" + name.text + "`");
+        if (semi) expectPunct(";", "after the assignment to `" + name.text + "`");
         if (op != "=") {  // compound: x += e  →  x = x + e
             Expr bin;
             bin.kind = Expr::Kind::Binary;
@@ -561,17 +564,17 @@ struct Parser {
         return e;
     }
 
-    // The body of `if` / `else`: a braced block or one statement. `trailing`
+    // The body of `if` / `else` / a loop: a braced block or one statement. `trailing`
     // receives the comments that sat just before the closing `}` (empty for
     // the one-statement form — there is no `}` there).
     std::vector<Stmt> parseBody(std::vector<Comment>& trailing) {
         if (isPunct("{")) return parseBlock(trailing);
-        if (isPunct(";")) {  // `if (c) ;`
+        if (isPunct(";")) {  // `if (c) ;`, `while (c) ;`
             ++i;
             return {};
         }
         if (atTypeWord())
-            failHere("a declaration cannot be the only statement of an `if`/`else`",
+            failHere("a declaration cannot be the only statement of an `if`/`else`/loop body",
                      "its scope would end immediately; C itself rejects it.",
                      "wrap it in braces or drop it.");
         std::vector<Stmt> body;
@@ -677,6 +680,152 @@ struct Parser {
         return s;
     }
 
+    // ---- loops (main-spec §6) ------------------------------------------------
+
+    // `while (expr) body` — the condition and the body are checked like an
+    // `if`'s; the shape is the same in Lean.
+    Stmt parseWhile() {
+        Stmt s;
+        s.kind = Stmt::Kind::While;
+        s.loc = peek().loc;
+        ++i;  // `while`
+        s.expr = parseParenExpr("while");
+        for (Comment& c : takeComments(i, true)) s.comments.push_back(std::move(c));
+        s.body = parseBody(s.bodyTrailing);
+        return s;
+    }
+
+    // `do body while (expr);` — the body runs first, so check.cpp emits it as
+    // `repeat body; unless expr do break`.
+    Stmt parseDoWhile() {
+        Stmt s;
+        s.kind = Stmt::Kind::DoWhile;
+        s.loc = peek().loc;
+        ++i;  // `do`
+        s.body = parseBody(s.bodyTrailing);
+        for (Comment& c : takeComments(i, true))  // between `}` and `while`: at the body's end
+            s.bodyTrailing.push_back(std::move(c));
+        if (!isIdent("while"))
+            failHere("expected `while` to close the `do`, found " + describe(peek()),
+                     "C requires `do { … } while (…);`.", "write the `while (…);` part.");
+        ++i;
+        s.expr = parseParenExpr("while");
+        for (Comment& c : takeComments(i, true)) s.comments.push_back(std::move(c));
+        expectPunct(";", "after the `do … while`");
+        return s;
+    }
+
+    // The `f(args)` statement without its `;` (a `for` header piece; the `)`
+    // follows). The caller has seen IDENT `(`.
+    Stmt parseCallNoSemi() {
+        Stmt s;
+        s.kind = Stmt::Kind::CallStmt;
+        s.loc = peek().loc;
+        s.expr = parseExpr();
+        if (s.expr.kind != Expr::Kind::Call)
+            fail(file, s.expr.loc, "an expression statement has no effect",
+                 "functions are pure in Lean, so only a call to a `void` function can stand alone.",
+                 "use the value, e.g. assign it to a local.");
+        return s;
+    }
+
+    // One assignment-shaped `for` step, without a `;`: `i++`, `++i`, `i = …`,
+    // `i += …`, `a[i] = …`. The prefix forms are legal only here.
+    Stmt parseForStep() {
+        if (isPunct("++") || isPunct("--")) {
+            Loc at = peek().loc;
+            std::string op = peek().text.substr(0, 1);
+            ++i;
+            Token name = expectName("the variable after `" + op + op + "`");
+            checkName(name);
+            Expr one;
+            one.kind = Expr::Kind::IntLit;
+            one.text = "1";
+            one.loc = at;
+            Expr bin;
+            bin.kind = Expr::Kind::Binary;
+            bin.text = op;
+            bin.loc = at;
+            Expr lhs;
+            lhs.kind = Expr::Kind::Ident;
+            lhs.text = name.text;
+            lhs.loc = name.loc;
+            bin.kids.push_back(std::move(lhs));
+            bin.kids.push_back(std::move(one));
+            Stmt s = makeAssign(name, std::move(bin));
+            s.loc = at;
+            return s;
+        }
+        if (atAssignment()) return parseAssignment(false);
+        if (peek().kind == Token::Kind::Ident && peek2().kind == Token::Kind::Punct &&
+            peek2().text == "(")
+            return parseCallNoSemi();
+        failHere("the step of a `for` is an assignment or a call",
+                 "C allows any expression there; clean has only statements.",
+                 "write `i++`, `i += e`, `i = e` or a call.");
+    }
+
+    // C's comma in a `for` header (`for (i = 0, j = 1; …; i++, j++)`): the
+    // catalogue's E103. Called after a header piece, when it ends early.
+    void noComma(const std::string& part) {
+        if (isPunct(","))
+            failCode("E103", file, peek().loc, "the comma operator in a `for` " + part,
+                     "C evaluates both sides for their side effects; clean has no expressions "
+                     "with effects (E103).",
+                     "declare one variable, or move the rest into the loop body.");
+    }
+
+    // `for (init?; cond?; step?) body` (§6.1). The three parts are kept as
+    // parsed; check.cpp decides range-for vs the general `while` form.
+    Stmt parseFor() {
+        Stmt s;
+        s.kind = Stmt::Kind::For;
+        s.loc = peek().loc;
+        ++i;  // `for`
+        expectPunct("(", "after `for`");
+        if (!isPunct(";")) {  // the initialiser: a declaration, an assignment or a call
+            if (peek().kind == Token::Kind::Ident &&
+                classifyTypeWord(peek().text) == TypeWord::Supported)
+                s.init.push_back(parseDeclTail());  // eats the `;` that separates the parts
+            else if (atAssignment()) {
+                Stmt a = parseAssignment(false);
+                noComma("initialiser");
+                expectPunct(";", "after the assignment");
+                s.init.push_back(std::move(a));
+            } else if (peek().kind == Token::Kind::Ident && peek2().kind == Token::Kind::Punct &&
+                       peek2().text == "(") {
+                Stmt c = parseCallNoSemi();
+                noComma("initialiser");
+                expectPunct(";", "after the call");
+                s.init.push_back(std::move(c));
+            } else {
+                failHere("the initialiser of a `for` is a declaration, an assignment or a call",
+                         "C allows any expression there; clean has only statements, and the "
+                         "comma operator is ⛔ (E103).",
+                         "write `T i = e`, `i = e`, or a call; move the rest into the loop body.");
+            }
+        } else {
+            ++i;  // the `;` of an absent initialiser
+        }
+        if (!isPunct(";")) {  // the condition: absent means `true` (C: loop forever)
+            s.expr = parseExpr();
+            expectPunct(";", "after the condition of the `for`");
+        } else {
+            ++i;
+            s.expr.kind = Expr::Kind::BoolLit;  // `for (;;)` — the general form emits `while true`
+            s.expr.text = "true";
+            s.expr.loc = s.loc;
+        }
+        if (!isPunct(")")) {
+            s.step.push_back(parseForStep());
+            noComma("step");
+        }
+        expectPunct(")", "to close the header of the `for`");
+        for (Comment& c : takeComments(i, true)) s.comments.push_back(std::move(c));
+        s.body = parseBody(s.bodyTrailing);
+        return s;
+    }
+
     // `printf(fmt, args);` `fprintf(stderr, fmt, args);` `puts(s);` `putchar(c);` — main-spec §8.
     // The format must be a string literal: it is cut into pieces here (format.h) because
     // the Lean `s!"…"` is built at translation time. Which argument fits which conversion
@@ -734,6 +883,58 @@ struct Parser {
         return s;
     }
 
+    // The `T name = expr;` / `T name[N]…;` statement, trailing `;` included —
+    // also the initialiser piece of a `for` header, where that `;` is the
+    // header's separator. Only called when the next word is a supported type.
+    Stmt parseDeclTail() {
+        Stmt s;
+        Loc typeAt = peek().loc;
+        Type base = parseCType();
+        int stars = parseStars();
+        Token name = expectName("a variable name");
+        checkName(name);
+        s.kind = Stmt::Kind::Decl;
+        s.name = name.text;
+        s.loc = name.loc;
+        if (base.kind == Type::Kind::Unit && stars == 0)
+            fail(file, typeAt, "a variable of type `void`", "`void` has no values.", "use a real type.");
+        while (isPunct("[")) s.dims.push_back(parseArraySize());
+        s.type = declare(base, stars, s.dims.size(), typeAt, false);
+        if (isPunct(",") || (isPunct(";") && s.dims.empty()))
+            fail(file, name.loc, "local `" + name.text + "` has no initial value",
+                 "Lean has no uninitialised variables, and picking a value would be guessing (D5).",
+                 "give it an initial value, e.g. `= 0`.");
+        if (isPunct(";")) {  // `T a[N];` — arrays are filled with default values (§4.4)
+            if (s.type.kind != Type::Kind::Array)
+                fail(file, name.loc, "local `" + name.text + "` has no initial value",
+                     "Lean strings are immutable, so an empty `char s[N]` could never be filled.",
+                     "write the string: `char s[] = \"…\";`.");
+            for (long long d : s.dims)
+                if (d < 0)
+                    fail(file, name.loc, "the size of the array `" + name.text + "` is missing",
+                         "with no initialiser there is nothing to take the size from.",
+                         "write the size: `" + name.text + "[N]`.");
+            s.noInit = true;
+            ++i;
+            return s;
+        }
+        expectPunct("=", "after the name of the local `" + name.text + "`");
+        if (s.type.kind == Type::Kind::Array) {
+            if (!isPunct("{"))
+                failHere("an array is initialised with `{ … }`",
+                         "C cannot copy an array with `=`.", "write the initialiser list.");
+            s.expr = parseInitList();
+        } else {
+            if (isPunct("{") && s.type.kind == Type::Kind::String)
+                failHere("a `char` array is a `String` in Lean",
+                         "main-spec §4.3 maps `char s[]` to an immutable `String`, not to an array of characters.",
+                         "initialise it with a string literal, or use `uint8_t a[N] = { … }` for bytes.");
+            s.expr = parseExpr();
+        }
+        expectPunct(";", "after the declaration of `" + name.text + "`");
+        return s;
+    }
+
     Stmt parseStmt() {
         Stmt s;
         s.loc = peek().loc;
@@ -758,68 +959,35 @@ struct Parser {
             expectPunct(";", "after the return expression");
             return s;
         }
-        if (classifyTypeWord(w) == TypeWord::Supported) {
-            Loc typeAt = peek().loc;
-            Type base = parseCType();
-            int stars = parseStars();
-            Token name = expectName("a variable name");
-            checkName(name);
-            s.kind = Stmt::Kind::Decl;
-            s.name = name.text;
-            s.loc = name.loc;
-            if (base.kind == Type::Kind::Unit && stars == 0)
-                fail(file, typeAt, "a variable of type `void`", "`void` has no values.", "use a real type.");
-            while (isPunct("[")) s.dims.push_back(parseArraySize());
-            s.type = declare(base, stars, s.dims.size(), typeAt, false);
-            if (isPunct(",") || (isPunct(";") && s.dims.empty()))
-                fail(file, name.loc, "local `" + name.text + "` has no initial value",
-                     "Lean has no uninitialised variables, and picking a value would be guessing (D5).",
-                     "give it an initial value, e.g. `= 0`.");
-            if (isPunct(";")) {  // `T a[N];` — arrays are filled with default values (§4.4)
-                if (s.type.kind != Type::Kind::Array)
-                    fail(file, name.loc, "local `" + name.text + "` has no initial value",
-                         "Lean strings are immutable, so an empty `char s[N]` could never be filled.",
-                         "write the string: `char s[] = \"…\";`.");
-                for (long long d : s.dims)
-                    if (d < 0)
-                        fail(file, name.loc, "the size of the array `" + name.text + "` is missing",
-                             "with no initialiser there is nothing to take the size from.",
-                             "write the size: `" + name.text + "[N]`.");
-                s.noInit = true;
-                ++i;
-                return s;
-            }
-            expectPunct("=", "after the name of the local `" + name.text + "`");
-            if (s.type.kind == Type::Kind::Array) {
-                if (!isPunct("{"))
-                    failHere("an array is initialised with `{ … }`",
-                             "C cannot copy an array with `=`.", "write the initialiser list.");
-                s.expr = parseInitList();
-            } else {
-                if (isPunct("{") && s.type.kind == Type::Kind::String)
-                    failHere("a `char` array is a `String` in Lean",
-                             "main-spec §4.3 maps `char s[]` to an immutable `String`, not to an array of characters.",
-                             "initialise it with a string literal, or use `uint8_t a[N] = { … }` for bytes.");
-                s.expr = parseExpr();
-            }
-            expectPunct(";", "after the declaration of `" + name.text + "`");
-            return s;
-        }
+        if (classifyTypeWord(w) == TypeWord::Supported) return parseDeclTail();
         if (w == "if") return parseIf();
         if (w == "switch") return parseSwitch();
+        if (w == "while") return parseWhile();
+        if (w == "do") return parseDoWhile();
+        if (w == "for") return parseFor();
         if (w == "break") {
             ++i;
             expectPunct(";", "after `break`");
             s.kind = Stmt::Kind::Break;
             return s;
         }
-        if (kLaterStatements.count(w))
-            failHere("`" + w + "` is not translated in this slice",
-                     "loops arrive in a later slice (see the plan in spec/impl-spec.md).",
-                     "write the computation without loops for now.");
+        if (w == "continue") {
+            ++i;
+            expectPunct(";", "after `continue`");
+            s.kind = Stmt::Kind::Continue;
+            return s;
+        }
+        if (w == "goto")
+            failCode("E102", file, peek().loc, "`goto` is not translated",
+                     "main-spec §6 keeps `goto` and labels ⛔; Lean has nothing they could map to.",
+                     "restructure with a loop (and `break`/`continue`), or an `if`/`else` chain.");
+        if (peek2().kind == Token::Kind::Punct && peek2().text == ":")
+            failCode("E102", file, peek().loc, "label `" + w + "` is not translated",
+                     "labels exist only for `goto`, which main-spec §6 keeps ⛔.",
+                     "drop the label; restructure with a loop, or an `if`/`else` chain.");
         if (atTypeWord()) parseCType();  // a type clean does not translate: refused with the reason
         if (isPrintName(w) && peek2().kind == Token::Kind::Punct && peek2().text == "(") return parsePrint();
-        if (atAssignment()) return parseAssignment();
+        if (atAssignment()) return parseAssignment(true);
         if (peek2().kind == Token::Kind::Punct && peek2().text == "(") {  // `f(args);` (check.cpp: void only)
             s.kind = Stmt::Kind::CallStmt;
             s.expr = parseExpr();
@@ -858,16 +1026,50 @@ struct Parser {
         return list;
     }
 
-    // A `break` that is not the closing statement of a switch group.
-    void rejectStrayBreak(const std::vector<Stmt>& list) {
+    // `break` / `continue` legality (main-spec §6). Only the shape of the tree
+    // matters: a `break` is legal inside a loop — and, inside a `switch` case,
+    // only as the case's last statement, which parseSwitch has already
+    // stripped; a `continue` is legal inside a loop, even inside a case (C
+    // binds it to the loop, and so does the emitted Lean). So the walk tracks
+    // two flags: `inLoop` (a loop encloses) and `inCase` (a switch case
+    // encloses, and no loop opened inside it — a `break` there would be C's
+    // "end the case early", which clean does not translate, not a loop exit).
+    void checkJumps(const std::vector<Stmt>& list, bool inLoop, bool inCase) {
         for (const Stmt& s : list) {
-            if (s.kind == Stmt::Kind::Break)
-                fail(file, s.loc, "`break` is only translated as the last statement of a switch case",
-                     "without loops, a `break` elsewhere would need an early exit that is not built yet.",
-                     "restructure with `if`/`else`, or end the case with `break;`.");
-            rejectStrayBreak(s.body);
-            rejectStrayBreak(s.elseBody);
-            for (const Case& c : s.cases) rejectStrayBreak(c.body);
+            if (s.kind == Stmt::Kind::Break && !(inLoop && !inCase))
+                fail(file, s.loc, "`break` is not translated here",
+                     inCase ? "C binds this `break` to the enclosing `switch` — it would end "
+                              "the case early, and clean's `match` arms cannot do that "
+                              "(only the case's last `break`, which the parser strips)."
+                            : "a `break` ends the innermost loop, and there is none here.",
+                     inCase ? "move it to the end of its case (or drop it), and use the "
+                              "loop's own `break` outside the `switch`."
+                            : "delete it, or put it inside a loop.");
+            if (s.kind == Stmt::Kind::Continue && !inLoop)
+                fail(file, s.loc, "`continue` outside a loop",
+                     "C binds it to the innermost loop, and there is none here.",
+                     "delete it, or put it inside a loop.");
+            switch (s.kind) {
+            case Stmt::Kind::If:
+                checkJumps(s.body, inLoop, inCase);
+                checkJumps(s.elseBody, inLoop, inCase);
+                break;
+            case Stmt::Kind::Block:
+                checkJumps(s.body, inLoop, inCase);
+                break;
+            case Stmt::Kind::Switch:
+                for (const Case& c : s.cases) checkJumps(c.body, inLoop, true);
+                break;
+            case Stmt::Kind::While:
+            case Stmt::Kind::DoWhile:
+                checkJumps(s.body, true, false);
+                break;
+            case Stmt::Kind::For:
+                checkJumps(s.body, true, false);
+                break;
+            default:
+                break;
+            }
         }
     }
 
@@ -955,7 +1157,7 @@ struct Parser {
         f.body = parseStmtList(false);
         expectPunct("}", "to close the body of `" + f.name + "`");
         f.bodyTrailing = takeComments(i, false);  // the comments that ended the body
-        rejectStrayBreak(f.body);
+        checkJumps(f.body, false, false);
         return f;
     }
 };

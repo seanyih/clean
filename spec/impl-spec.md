@@ -3,14 +3,15 @@
 Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
-Current state: **slices 0–8** — functions over every type of main-spec §4.1
+Current state: **slices 0–9** — functions over every type of main-spec §4.1
 and §4.3–4.4 except structs/enums/typedefs: integers, `intN_t`/`uintN_t`,
 `bool`, `char`, `bv(N)`, `float`/`double`, `void`, strings and arrays, with
-locals, `if`, `switch` (on `int`/`unsigned`), casts, automatic conversions
-between mixed types (D19), recursion, the opt-in `--lint=c-semantics`
-(D18), `void` array writers (OD11 c → D20), and console output with `IO`
-(main-spec §8: `printf`, `puts`, `putchar`, `fprintf(stderr, …)`, `main`).
-Adding a type is one table
+locals, `if`, `switch` (on `int`/`unsigned`), **loops (main-spec §6:
+range-`for`, general `for`, `while`, `do … while`, `break`/`continue`)**,
+casts, automatic conversions between mixed types (D19), recursion, the opt-in
+`--lint=c-semantics` (D18), `void` array writers (OD11 c → D20), and console
+output with `IO` (main-spec §8: `printf`, `puts`, `putchar`,
+`fprintf(stderr, …)`, `main`). Adding a type is one table
 row plus a few `case`s: see
 [how-to-extend.md](how-to-extend.md).
 
@@ -68,6 +69,10 @@ from the main spec's D7 table):
 | assigning a parameter                | `let mut a : T' := a` at the top              |
 | `if (c) … else if (d) … else …`      | `if c then … else if d then … else …`         |
 | `switch (e) { case 0: case 1: … }`   | `match e with \| 0 \| 1 => …` (see below)     |
+| `while (c) { … }`                    | `while c' do …` (see **Loops** below)         |
+| `do { … } while (c);`                | `repeat … unless c' do break`                 |
+| `for (…; …; …)`                      | `for i in [A:B] do` or a `while` (see below)  |
+| `break;`  `continue;`                | `break`  `continue` (inside a loop)           |
 | `return e;`                          | `return e`                                    |
 | `{ … }` (bare block)                 | flattened into its parent                     |
 
@@ -228,9 +233,52 @@ program runs. If an argument calls an `IO` function the statement becomes
 
 **Switch.** The scrutinee is `int` or `unsigned` (match patterns on the other
 types are unverified). Labels are integer literals (`3`, `-1`, `0x10`). Labels that
-follow each other become one or-pattern. Each case ends with `break;` or a
-`return`; `default` may sit anywhere and is emitted last; no `default` →
+follow each other become one or-pattern. Each case ends with `break;`, a
+`return`, or — inside a loop — a `continue` (all three mean "does not fall
+through"); `default` may sit anywhere and is emitted last; no `default` →
 `| _ => pure ()`. Fall-through from a non-empty case is **E105**.
+
+**Loops** (main-spec §6, §6.1). `while (c) { … }` is `while c' do …` —
+Lean's sugar re-tests the condition every iteration, exactly like C, so an
+I/O call in the condition (`while (ask_more())`) works. `do { … } while (c);`
+runs the body first: it is `repeat … unless c' do break`, with the exit test
+as the last statement of the body, where C re-tests it (a `continue` inside
+the body skips to the test, as in C).
+
+A `for` takes one of two forms, chosen by check.cpp because only the types
+say which (§6.1):
+
+* **Range-for** — `for (T i = A; i < B; i++)` (also `<=`, also `i += K`) where
+  `A` and `B` are non-negative integer literals or `unsigned`/`uintN_t`-valued
+  expressions, `K` a literal ≥ 1, and the body writes neither `i` nor
+  anything the bounds read: the range freezes `A`/`B` at loop entry, while C
+  re-tests them every iteration, so a loop whose body moves its own bound
+  takes the general form below. Emitted
+  `for i in [A:B] do` — `<=` widens a literal bound (`B+1` is computed,
+  an expression bound is spelled `B' + 1`), `i += K` becomes `[A:B:K]`
+  (an expression step is not translated: Lean's range needs a literal `K`).
+  The range is a `Nat` range, so: an `unsigned`/`uintN_t` loop variable is
+  the range's `Nat` in the body and converts at use sites (`s + UInt32.ofNat i`,
+  §14.2); an `int` one is rebound at the top of the body —
+  `let i : Int := ↑i` — so the body keeps its C type (§6.1). A `uintN_t`
+  bound reads `.toNat`; an `int`-valued bound does **not** become a range
+  (§14.2): those loops take the general form below.
+* **General for** — everything else: the initialiser before a `while`, the
+  step at the end of the body and before every `continue` that binds this
+  loop. `for (;;)` and a header with no condition emit `while true do`. The
+  step is repeated textually, so two shapes are refused (both with a fix): a
+  loop variable that hides an outer name of the same kind (the flattened
+  `let` would shadow it after the loop, like a bare block), and a body local
+  that shadows a name the injected step — or the re-tested `do … while`
+  condition — was checked with.
+
+`break`/`continue` bind the innermost loop. Inside a `switch`, C's `break`
+closes the case: only the case's *last* `break` is translated (the parser
+strips it); a mid-case `break` is refused even inside a loop. A `continue`
+inside a case binds the loop (C and Lean agree). `goto` and labels are
+**E102**. A loop is not a return path: `while (1) { … return …; }` as a whole
+body still needs a trailing `return` (clean cannot prove the loop never ends;
+see "Known simplifications").
 
 **Recursion.** A function that reaches itself is printed as it is.
 Functions that call each other are grouped in one `mutual … end` block. Whether
@@ -242,19 +290,21 @@ mutual) without any attribute — the `nat_*` cases rely on that; on `Int` it
 cannot (see `cases-lean-rejects`).
 
 Not translated yet (each is a hard error with location + why + fix):
-loops (`for`, `while`, `do`, `continue`), `break` outside a switch case's end,
 `?:`, uninitialised scalar locals (`int x;`; arrays may be uninitialised),
-structs, enums, typedefs, unions, `static`/`extern`/`inline`, the §5.4
-bit-vector helpers (`bv_cat` …), the `<string.h>` helpers, `switch` on types
+`goto` and labels (**E102** — permanent, main-spec §6), structs, enums,
+typedefs, unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
+(`bv_cat` …), the `<string.h>` helpers, `switch` on types
 other than `int`/`unsigned`, `scanf`/`getchar`/`fgets`, file I/O, `exit`,
 `main(argc, argv)`, `sprintf`/`snprintf`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
 one is an error, not a silent wrong name), Sparkle, theorems.
 
-Diagnostic codes: **E103** (assignment as expression), **E105** (switch
-fall-through), **E110** (`++`/`--` in an expression), **E301** (bit-width
-mismatch), **E302** (bit-vector width not a constant), **E303** (bitwise on
-`int`), **H004** (bitwise on `char`), **E101** (pointers outside §4.6, string
-mutation), **H001** (`bool` array hint), **W006** (`printf` formatting simplified) follow the catalogue
+Diagnostic codes: **E102** (`goto`/labels), **E103** (assignment as
+expression; the `for`-header comma), **E105** (switch fall-through), **E110**
+(`++`/`--` in an expression), **E301** (bit-width mismatch), **E302**
+(bit-vector width not a constant), **E303** (bitwise on `int`), **H004**
+(bitwise on `char`), **E101** (pointers outside §4.6, string
+mutation), **H001** (`bool` array hint), **W006** (`printf` formatting
+simplified) follow the catalogue
 in spec/error-codes.md, which also tracks which codes are implemented.
 **E000** is the placeholder for everything else ("not in the current
 build"); real codes arrive with the features they guard.
@@ -281,7 +331,9 @@ convert and print as tests. The layers ask it; none of them names a type.
       │                              (Expr::type), implicit conversions,
       │                              tests-vs-values, every path returns,
       │                              switch rules; marks which locals are `mut`
-      │                              and which functions are `IO`
+      │                              and which functions are `IO`; decides
+      │                              range-for vs the general `while` form
+      │                              and rewrites the latter (§6.1)
       ▼
     lint.cpp     AST   → notes       only with --lint=c-semantics: where C behaves
       │                              differently (W001–W014); never changes the tree
@@ -334,11 +386,9 @@ The suite (`test/run_e2e.sh`, `make test`):
    by default.
 
 Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run **with Lean 4.35.0**: 2026-10-19, after the
-OD11 slice — all passing (77/77, plus `run_e2e_hard.sh`). The I/O slice
-(2026-10-20) was run **without Lean**: golden diffs, refusals and lint
-reports pass (92/92); the five `io*` cases' generated Lean and `.checks.lean`
-(including the `#guard_msgs` output checks) still await a Lean run.
+`lean` is missing). Last full run **with Lean 4.35.0**: 2026-10-23, after the
+loops slice — all passing (**106/106**: the e2e suite, plus
+`run_e2e_hard.sh`; the earlier I/O cases were re-verified by the same run).
 
 ## Main-spec decisions honored here
 
@@ -383,6 +433,30 @@ reports pass (92/92); the five `io*` cases' generated Lean and `.checks.lean`
   comments nest).
 - **Literals**: hex is passed through verbatim; `0B…` is written `0b…`.
   Octal and suffixes (`10u`) are not translated.
+- **A loop is not a return path.** `int f(…) { while (1) { …; return …; } }`
+  is refused with the missing-return diagnostic: clean cannot prove the loop
+  never falls through, and the emitted `do` block would need a value after it.
+  Write the trailing `return` (C needs nothing; clean does).
+- **Loops flatten like bare blocks when they must.** The general `for`
+  initialiser becomes an ordinary `let` before its `while`, so a loop
+  variable that hides an outer name is refused (same reasoning as a bare
+  block), and a body local shadowing a name the injected step or the re-tested
+  `do … while` condition uses is refused too. Range-fors, `while` and
+  `do … while` bodies are real scopes and shadow freely.
+- **An unused loop variable** keeps its name (D8) and Lean's
+  `unusedVariables` linter warns about it (`for k in [0:2] do …` where the
+  body ignores `k`); harmless, and silencing it would rename the variable.
+- **`while`/`repeat` are opaque to the kernel:** `#guard` (compiler
+  evaluation) checks loop results; `rfl`/`decide` cannot reduce them. The
+  test suite uses `#guard` for loop cases.
+- **`[a:b]` / `[a:b:k]` range notation** (Lean's `Std.Range`), `while … do`,
+  `repeat`, `break`/`continue` inside them, `unless c do break`, early
+  `return` from inside loops, the `let i : Int := ↑i` rebinding, `while (← f)`
+  re-running an I/O condition per iteration, and `UInt32.ofNat i` in a
+  `uintN_t` range-for body all type-checked on Lean 4.35.0 by the full suite
+  (2026-10-20). An expression step (`i += k` with a variable `k`) cannot be
+  a range: Lean elaborates only literal steps — those loops take the
+  general form.
 - **Recursion is judged by Lean:** clean does not try to prove termination,
   and E201 (recursion rejected in `synth`) does not exist yet.
 - **Conversions follow D19, which is a choice, not C.** `uint8_t + int` is
@@ -404,13 +478,12 @@ reports pass (92/92); the five `io*` cases' generated Lean and `.checks.lean`
 
 ## Next slices (suggested, one e2e case each)
 
-1. Range-`for` (§6.1) and `while`; `break`/`continue` inside them.
-2. Input (`scanf`, `getchar`, `fgets(stdin)`, §8.1 🟡) and `exit(n)`, then
+1. Input (`scanf`, `getchar`, `fgets(stdin)`, §8.1 🟡) and `exit(n)`, then
    file I/O (`IO.FS`) and `main(argc, argv)`. `sprintf` → `s!` fits the same
    format cutter.
-3. Structs, enums, typedefs (§4.5): they need file-scope declarations in the
+2. Structs, enums, typedefs (§4.5): they need file-scope declarations in the
    AST, which is the next structural step. Also unlocks `switch` on enums.
-4. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
+3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
    give E301 its fix — and the `<string.h>` helpers (§12.3).
-5. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and
+4. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and
    a tuple return for non-`void` writers / several written arrays.

@@ -1,7 +1,7 @@
 # How to extend `clean` — a developer's manual
 
 For downstream developers: where a feature lives, which files to touch, and
-how to prove it works. State: slices 0–8 (2026-10-20). If the architecture
+how to prove it works. State: slices 0–9 (2026-10-20). If the architecture
 moves, update this file with your slice.
 
 ## The pipeline (src/)
@@ -107,7 +107,7 @@ update impl-spec.md (the types table) and error-codes.md.
 | Feature (main-spec)                  | Hook                                                                      |
 | ------------------------------------ | ------------------------------------------------------------------------- |
 | typedefs, structs, enums (§4.5)      | file-scope declarations in `TranslationUnit` + `toposort.cpp` ordering; a `Type::Kind` that carries a name (`Type` already has `args`; add a name field, update `operator==`) |
-| loops (§6.1), `?:`                   | recipe 3 (statement) / a new `Expr::Kind`; loops need `mut` marking and a termination story in `emitFunction` |
+| `?:`                                 | recipe 1's expression cousin: a new `Expr::Kind` and `valueType`/`emitExpr` cases |
 | `printf` / `IO` (§8)                 | purity inference (D7) in `emitFunction`; makes `void` functions observable |
 | `bv_*` helpers (§5.4)                | calls to known names in `check.cpp` `Call`; signatures in types.cpp       |
 | `<string.h>` helpers (§12.3)         | same: known names in `Call`, `String` arguments                           |
@@ -117,9 +117,12 @@ update impl-spec.md (the types table) and error-codes.md.
 Done and worth reading as worked examples: arrays (`Type::arrayOf`,
 `Expr::Kind::Index`/`ArrayLit`, `initList`, `declStmt` in check.cpp),
 strings (`StringLit`, `String` rows in `unify`/`convert`), `void`
-(`CallStmt`, `return;`), and the `void` array writers (`findWriters` in
+(`CallStmt`, `return;`), the `void` array writers (`findWriters` in
 check.cpp, `writerParam`/`writeBack` and the value-yielding `if`/`match`
-paths in `emitter.cpp`).
+paths in `emitter.cpp`), and **loops** (§6: `parseWhile`/`parseDoWhile`/
+`parseFor`/`checkJumps` in parser.cpp; the range-for decision, the
+general-form rewrite and the two shadow-safety walks in `Checker::forStmt`;
+the emission in `emitter.cpp`'s `emitList` + `rangeText`).
 
 **Lean name provenance.** The sandbox that wrote the slices up to `void` had
 no Lean; the names from those slices (`Array.replicate`, `Array.set!`,

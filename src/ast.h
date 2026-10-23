@@ -88,14 +88,33 @@ struct Case {
 //   Return  `return expr;`          expr   (`return;`: noValue)
 //   Switch  `switch (expr) {…}`     expr, cases
 //   Block   `{ body }`              body
+//   While   `while (expr) body`     expr, body   (main-spec §6)
+//   DoWhile `do body while (expr);` expr, body   (emitted `repeat … unless expr do break`)
+//   For     `for (init; expr; step) body`  (§6.1) — the parser keeps the header parts
+//                                   (init/step hold one statement each, or none; the
+//                                   condition is always present, `true` when the header
+//                                   omits it). check.cpp then either marks it `range`
+//                                   (a range-for: the loop variable is `init`'s name,
+//                                   the bounds are read from the header when emitting)
+//                                   or rewrites it into the general form: init before a
+//                                   `while`, the step at the end of the body and before
+//                                   every `continue` of this loop (a `Block` around both,
+//                                   so the emitter only ever sees `range` Fors, `While`
+//                                   and `Block`)
+//   Break   `break;`                ends the innermost loop; the parser strips the ones
+//                                   that close a switch case (they never reach the tree)
+//                                   and rejects the rest (mid-case `break` included: C
+//                                   binds those to the switch, which clean cannot express)
+//   Continue `continue;`            legal only inside a loop (the parser checks)
 //   Print   `printf(…);` `puts(s);` `putchar(c);` `fprintf(stderr, …);`   (main-spec §8)
 //                                   name = the C function, toStderr, pieces + newline (printf
 //                                   family), args = the arguments (printf: one per conversion;
 //                                   puts/putchar: the one value), script = at file scope
-//   Break   `break;`                only transient: the parser strips the legal
-//                                   ones from switch cases and rejects the rest
 struct Stmt {
-    enum class Kind { Decl, Assign, CallStmt, If, Return, Switch, Block, Break, Print };
+    enum class Kind {
+        Decl, Assign, CallStmt, If, Return, Switch, Block, Break, Continue, While, DoWhile,
+        For, Print
+    };
     Kind kind = Kind::Return;
     std::string name;
     Type type;                          // Decl: the declared type
@@ -103,6 +122,10 @@ struct Stmt {
     std::vector<Stmt> body;
     std::vector<Stmt> elseBody;
     std::vector<Case> cases;
+    std::vector<Stmt> init;             // For: the initialiser (none, or one Decl/Assign/CallStmt)
+    std::vector<Stmt> step;             // For: the step (none, or one Assign/CallStmt)
+    bool range = false;                 // For: check.cpp recognised a range-for (§6.1)
+    bool inclusive = false;             // For, range: the condition was `<=` (hi becomes B+1)
     bool mut = false;                 // Decl: assigned again later → `let mut` (set by check.cpp)
     std::vector<long long> dims;      // Decl of an array: the declared sizes, outermost first
     bool noInit = false;              // Decl: `T a[N];` with no `=` (arrays are zero-filled, §4.4)
@@ -130,10 +153,18 @@ void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
     for (const Stmt& s : stmts) {
         for (const Expr& ix : s.indices) f(ix);
         const bool noExpr = s.kind == Stmt::Kind::Block || s.kind == Stmt::Kind::Break ||
-                            s.kind == Stmt::Kind::Print ||
+                            s.kind == Stmt::Kind::Continue || s.kind == Stmt::Kind::Print ||
                             (s.kind == Stmt::Kind::Decl && s.noInit) ||
                             (s.kind == Stmt::Kind::Return && s.noValue);
         if (!noExpr) f(s.expr);
+        for (const Stmt& part : s.init) {  // a For initialiser (one Decl/Assign/CallStmt)
+            for (const Expr& ix : part.indices) f(ix);
+            if (!(part.kind == Stmt::Kind::Decl && part.noInit)) f(part.expr);
+        }
+        for (const Stmt& part : s.step) {  // a For step (one Assign/CallStmt)
+            for (const Expr& ix : part.indices) f(ix);
+            f(part.expr);
+        }
         for (const Expr& a : s.args) f(a);
         forEachExpr(s.body, f);
         forEachExpr(s.elseBody, f);
