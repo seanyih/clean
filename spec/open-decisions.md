@@ -41,4 +41,16 @@ veto; confirm them and they move to [design-decisions.md](design-decisions.md).
 | Short array initialisers | `int a[5] = {7, 8};` is `#[7, 8] ++ Array.replicate 3 0` (C zero-fills the rest); `{0}` is `Array.replicate N 0`. | impl-spec.md "Arrays" |
 | Lint set | `--lint=c-semantics` implements W001, W002, W005, W007, W008, W009, W010, W011 and the new W014; W003, W004, W006 wait for their features. | src/lint.h |
 
+Taken while building slice 9 (input and files, 2026-10-23); they stand unless you veto:
+
+| What | Decision | Where |
+| ---- | -------- | ----- |
+| `scanf` reads whole words | Each conversion takes one whitespace-separated word and the whitespace after it is consumed; C would read only what the conversion accepts and leave the rest in the stream (`%d` on `1.5` gives 1 in C, nothing here). Lean's streams cannot push a character back, so exact C behaviour would need our own buffering layer. Reported by the provisional lint **W015**. | impl-spec.md "Input and files", src/lint.cpp |
+| `fopen` failure | An error that stops the program, not `NULL`; `NULL` and stream comparisons are refused. Lint **W016**. Alternative: map to `IO (Option Stream)` and give `NULL` a meaning. | impl-spec.md, src/lint.cpp |
+| New lint codes | W015 and W016 are new catalogue entries (the catalogue says a lint outside it is a spec change). Confirm, renumber or drop them. | spec/error-codes.md |
+| `FILE *` is `IO.FS.Stream` | One stream type; `fclose` is `flush` (Lean closes a handle when it is dropped). | src/types.cpp |
+| `argv[0]` | The path of the running Lean program (`IO.appPath`). | impl-spec.md |
+| `exit(n)` status | Taken mod 256 as a `UInt8`, like C. | src/check.cpp |
+| Helper `def`s in the output | `hexOf` and the new input helpers are printed at the top of each file that needs them; their names are reserved (a user function of that name is refused). Lean `String.asString` is deprecated in 4.35, so `hexOf` now uses `String.ofList`. | src/prelude.cpp |
+
 Suggested next slices are a plan, not decisions; they live in impl-spec.md.

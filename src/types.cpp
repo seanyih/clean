@@ -20,6 +20,7 @@ const std::set<std::string> kSupported = {
     "int8_t", "int16_t", "int32_t", "int64_t",                       // Int8 … Int64
     "uint8_t", "uint16_t", "uint32_t", "uint64_t",                   // UInt8 … UInt64
     "bv", "_BitVec",                                                 // BitVec N (parser reads the `(N)`)
+    "FILE",                                                          // `FILE *` → IO.FS.Stream
     "void",                                                          // Unit (a return type only)
     "const", "restrict",                                             // qualifiers: ignored (§4.7)
 };
@@ -91,6 +92,7 @@ bool isNumeric(Type t) {
     case Type::Kind::Char:
     case Type::Kind::String:
     case Type::Kind::Array:
+    case Type::Kind::File:
     case Type::Kind::Unit: return false;
     default: return true;
     }
@@ -131,6 +133,7 @@ bool isLiteral(Type t) {
 bool isFloat(Type t) { return t.kind == Type::Kind::Float32 || t.kind == Type::Kind::Float64; }
 bool isArray(Type t) { return t.kind == Type::Kind::Array; }
 bool isString(Type t) { return t.kind == Type::Kind::String; }
+bool isFile(Type t) { return t.kind == Type::Kind::File; }
 
 std::string leanName(Type t) {
     switch (t.kind) {
@@ -148,6 +151,7 @@ std::string leanName(Type t) {
     case Type::Kind::String:       return "String";
     case Type::Kind::Array:        return "Array " + wrapName(t.elem());
     case Type::Kind::Unit:         return "Unit";
+    case Type::Kind::File:         return "IO.FS.Stream";
     }
     return "";
 }
@@ -168,6 +172,7 @@ std::string cName(Type t) {
     case Type::Kind::String:       return "char *";
     case Type::Kind::Array:        return cName(t.elem()) + "[]";
     case Type::Kind::Unit:         return "void";
+    case Type::Kind::File:         return "FILE *";
     }
     return "";
 }
@@ -183,7 +188,7 @@ TypeWord classifyTypeWord(const std::string& word) {
 bool isBitVecWord(const std::string& word) { return word == "bv" || word == "_BitVec"; }
 
 std::string supportedTypesHint() {
-    return "`int`, `unsigned`, `uint8_t`/`int32_t`…, `bv(N)`, `bool`, `char`, `float`, `double`, `char *` or an array";
+    return "`int`, `unsigned`, `uint8_t`/`int32_t`…, `bv(N)`, `bool`, `char`, `float`, `double`, `char *`, `FILE *` or an array";
 }
 
 TypeResolution makeBitVec(long long width) {
@@ -207,6 +212,7 @@ TypeResolution resolveTypeWords(const std::vector<std::string>& allWords) {
                    "write the type: " + supportedTypesHint() + ".");
     const std::string spelled = joined(words);
     if (words.size() == 1 && words[0] == "void") return good(Type::of(Type::Kind::Unit));
+    if (words.size() == 1 && words[0] == "FILE") return good(Type::of(Type::Kind::File));  // the `*` comes with the declarator
     for (const std::string& w : words)
         if (w == "void")
             return bad("`" + spelled + "` is not a valid C type", "`void` stands alone.", "fix the spelling.");
@@ -293,6 +299,12 @@ TypeResolution applyDeclarator(Type base, int star, int brackets, bool isParam) 
         return r;
     };
     const bool isChar = base.kind == Type::Kind::Char;
+    if (base.kind == Type::Kind::File) {
+        if (star == 1 && brackets == 0) return good(base);  // `FILE *` is the one stream type
+        return e101("`FILE` used other than as `FILE *`",
+                    "a stream is only ever handled through a pointer, and clean has one stream type.",
+                    "write `FILE *f`.");
+    }
     if (star == 0 && brackets == 0) return good(base);
     if (base.kind == Type::Kind::Unit)
         return e101("`void *` is a pointer to nothing in particular", "main-spec §4.6 accepts only array "
@@ -396,6 +408,9 @@ OpRule checkBinaryOp(const std::string& op, Type t) {
     };
     const std::string what = "`" + op + "` on `" + cName(t) + "`";
 
+    if (t.kind == Type::Kind::File)
+        return refuse("E000", what + " is not translated", "a `FILE *` is a stream, not a number.",
+                      "pass it to `fprintf`, `fgets`, `fclose`, … instead.");
     if (t.kind == Type::Kind::String || t.kind == Type::Kind::Array || t.kind == Type::Kind::Unit)
         return refuse("E000", what + " is not translated",
                       "a `" + cName(t) + "` is not a number in Lean.",
@@ -435,6 +450,7 @@ OpRule checkBinaryOp(const std::string& op, Type t) {
     case Type::Kind::Float64:
         return refuse("E000", what + " is not translated", "C itself has no bitwise operators on floats.",
                       "convert to an integer type first.");
+    case Type::Kind::File:
     case Type::Kind::String:
     case Type::Kind::Array:
     case Type::Kind::Unit: return r;  // refused above
@@ -472,6 +488,7 @@ OpRule checkUnaryOp(const std::string& op, Type t) {
         case Type::Kind::Char:
         case Type::Kind::String:
         case Type::Kind::Array:
+        case Type::Kind::File:
         case Type::Kind::Unit:
             return refuse("E000", what + " is not translated", "it is not a number in Lean.",
                           "convert to a number first.");
@@ -503,6 +520,7 @@ OpRule checkUnaryOp(const std::string& op, Type t) {
                       "convert to an integer type first.");
     case Type::Kind::String:
     case Type::Kind::Array:
+    case Type::Kind::File:
     case Type::Kind::Unit:
         return refuse("E000", what + " is not translated", "it is not a number in Lean.",
                       "convert to a number first.");
@@ -564,6 +582,8 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
         return fail(kNoRow, "index the string (`s[i]`) to get a character, or compare it with `==`.");
     if (from.kind == K::Unit)
         return fail(kNoRow, "a `void` call has no value; call it as a statement.");
+    if (from.kind == K::File)
+        return fail(kNoRow, "a `FILE *` only goes to the stream functions (`fprintf`, `fgets`, `fclose`, …).");
 
     // A literal takes its type from where it is used: no conversion, only an ascription.
     if (from.kind == K::Literal || from.kind == K::FloatLiteral) {
@@ -654,6 +674,7 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
     }
     case K::String:
     case K::Array:
+    case K::File:
     case K::Unit: return fail(kNoRow, "there is no conversion to this type.");
     }
     return fail(kNoRow, "cast through an integer type first.");
@@ -662,7 +683,8 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
 // ---- tests ------------------------------------------------------------------------------
 
 bool hasTruth(Type t) {
-    return t.kind != Type::Kind::Char && t.kind != Type::Kind::Array && t.kind != Type::Kind::Unit;
+    return t.kind != Type::Kind::Char && t.kind != Type::Kind::Array && t.kind != Type::Kind::Unit &&
+           t.kind != Type::Kind::File;
 }
 
 std::string truthTest(Type t, const std::string& x) {
@@ -675,6 +697,7 @@ std::string truthTest(Type t, const std::string& x) {
     case Type::Kind::String:       return x + " != \"\"";  // §5.2
     case Type::Kind::Char:
     case Type::Kind::Array:
+    case Type::Kind::File:
     case Type::Kind::Unit:         return "";
     case Type::Kind::Literal:
     case Type::Kind::Int:
@@ -717,6 +740,10 @@ OpRule checkCompare(const std::string& op, Type t) {
     case Type::Kind::Array:
         return refuse("comparison of arrays", "in C it would compare addresses, which Lean arrays do not have.",
                       "compare the elements.");
+    case Type::Kind::File:
+        return refuse("comparison of `FILE *` values",
+                      "clean has no `NULL` stream to compare with: `fopen` that fails stops the program.",
+                      "drop the comparison.");
     case Type::Kind::Unit:
         return refuse("comparison of `void`", "there is no value.", "remove it.");
     default: return r;
@@ -738,6 +765,7 @@ std::string zeroValue(Type t) {
     case Type::Kind::Char:         return "'\\x00'";
     case Type::Kind::String:       return "\"\"";
     case Type::Kind::Array:        return "#[]";
+    case Type::Kind::File:
     case Type::Kind::Unit:         return "()";
     }
     return "";

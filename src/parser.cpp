@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <utility>
 
+#include "builtins.h"
 #include "format.h"
 
 namespace {
@@ -42,10 +43,6 @@ const std::set<std::string> kLeanKeywords = {
     "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64", "use",
 };
 
-// The C output functions clean turns into `IO` (main-spec §8.1).
-bool isPrintName(const std::string& w) {
-    return w == "printf" || w == "puts" || w == "putchar" || w == "fprintf";
-}
 
 [[noreturn]] void failCode(const char* code, const std::string& file, Loc loc,
                            const std::string& what, const std::string& why,
@@ -405,6 +402,20 @@ struct Parser {
         if (t.kind == Token::Kind::Ident && t.text == "BV" && peek2().kind == Token::Kind::Punct &&
             peek2().text == "(")
             return parseBvLiteral();
+        if (t.kind == Token::Kind::Ident && isLibraryConstant(t.text)) {  // EXIT_FAILURE, EOF, …
+            ++i;
+            const long long v = libraryConstant(t.text);
+            Expr e;
+            e.kind = Expr::Kind::IntLit;
+            e.text = std::to_string(v < 0 ? -v : v);
+            e.loc = t.loc;
+            if (v >= 0) return e;
+            Expr neg;  // written as the `-1` C's `EOF` stands for
+            neg.kind = Expr::Kind::UnaryNeg;
+            neg.loc = t.loc;
+            neg.kids.push_back(std::move(e));
+            return neg;
+        }
         if (t.kind == Token::Kind::Ident) {
             if (macros.count(t.text))
                 fail(file, t.loc,
@@ -412,6 +423,12 @@ struct Parser {
                      "a macro name is not a Lean name; expanding it would be guessing.",
                      "write the value directly, or wait for preprocessor support.");
             ++i;
+            if (isPunct("(") && classifyLibName(t.text) == LibName::Scan)
+                fail(file, t.loc, "the result of `" + t.text + "(…)` is used as a value",
+                     "`" + t.text + "` is translated as an `IO` action that stores into variables; the count "
+                     "of conversions it returns is not given back, and a variable keeps its value when "
+                     "nothing was read.",
+                     "call it as a statement, on its own line, and give the variables a default value.");
             if (isPunct("(")) {  // function call
                 ++i;
                 Expr e;
@@ -836,15 +853,27 @@ struct Parser {
         s.loc = peek().loc;
         s.name = toks[i++].text;
         expectPunct("(", "after `" + s.name + "`");
-        const bool formatted = s.name == "printf" || s.name == "fprintf";
+        const bool toString = s.name == "sprintf" || s.name == "snprintf";
+        const bool formatted = s.name == "printf" || s.name == "fprintf" || toString;
+        if (toString) {  // the string variable that receives the text, and (snprintf) its size
+            Token target = expectIdent("the string variable `" + s.name + "` fills");
+            s.targets.push_back(target.text);
+            s.targetLocs.push_back(target.loc);
+            expectPunct(",", "after the buffer of `" + s.name + "`");
+            if (s.name == "snprintf") {
+                s.hasLimit = true;
+                s.limit = parseExpr();
+                expectPunct(",", "after the size of `snprintf`");
+            }
+        }
         if (s.name == "fprintf") {
-            if (peek().kind == Token::Kind::Ident && (peek().text == "stderr" || peek().text == "stdout")) {
-                s.toStderr = peek().text == "stderr";
+            if (peek().kind == Token::Kind::Ident && (peek().text == "stderr" || peek().text == "stdout") &&
+                peek2().kind == Token::Kind::Punct && peek2().text == ",") {
+                s.toStderr = peek().text == "stderr";  // the two standard streams keep their own spelling
                 ++i;
             } else {
-                failHere("`fprintf` to something other than `stderr` or `stdout`",
-                         "writing to files needs `fopen` and `IO.FS`, which main-spec §8.1 keeps 🟡.",
-                         "print to `stdout` or `stderr`.");
+                s.hasStream = true;  // any `FILE *` value (check.cpp: it must be one)
+                s.stream = parseExpr();
             }
             expectPunct(",", "after the stream of `fprintf`");
         }
@@ -877,9 +906,150 @@ struct Parser {
                      "make the number of arguments match the conversions.");
         } else {
             s.args.push_back(parseExpr());
+            if (s.name == "fputs" || s.name == "fputc" || s.name == "putc") {  // the stream comes last
+                expectPunct(",", "after the value of `" + s.name + "`");
+                s.hasStream = true;
+                s.stream = parseExpr();
+            }
         }
         expectPunct(")", "to close the argument list of `" + s.name + "`");
         expectPunct(";", "after `" + s.name + "(…)`");
+        return s;
+    }
+
+    // The format of `scanf` / `fscanf`: a string literal, cut up like a `printf` one. Only
+    // whitespace may sit between the conversions (what C does with it is "skip any whitespace",
+    // which is what every conversion but `%c` does anyway); literal text to match is refused.
+    // Width, flags and precision change what is read (`%5s`), so they are refused too.
+    void parseScanFormat(Stmt& s) {
+        if (peek().kind != Token::Kind::StringLit)
+            failHere("the format of `" + s.name + "` is not a string literal",
+                     "clean needs to see which conversions read which variables.",
+                     "write the format as a literal: `scanf(\"%d\", &n)`.");
+        Loc at = peek().loc;
+        std::string text = toks[i++].text;
+        while (peek().kind == Token::Kind::StringLit) {  // "a" "b" is one literal in C
+            text = text.substr(0, text.size() - 1) + peek().text.substr(1);
+            ++i;
+        }
+        FormatResult f = parseFormat(text.substr(1, text.size() - 2));
+        if (!f.ok) fail(file, at, f.problem, f.why, f.fix);
+        for (const FmtPiece& p : f.pieces) {
+            if (p.conv) {
+                if (p.padded)
+                    fail(file, at, "a width, flag or precision in the format of `" + s.name + "`",
+                         "`%5s` and friends change how much is read, and clean reads whole words.",
+                         "drop it.");
+                if (p.conv == 'X' || p.conv == 'x')
+                    fail(file, at, "`%x` in the format of `" + s.name + "`",
+                         "reading hexadecimal is not translated.", "read a decimal number with `%d`.");
+                continue;
+            }
+            for (size_t k = 0; k < p.lit.size(); ++k) {
+                const char c = p.lit[k];
+                const bool ws = c == ' ' || c == '\t' ||
+                                (c == '\\' && k + 1 < p.lit.size() && (p.lit[k + 1] == 'n' || p.lit[k + 1] == 't'));
+                if (c == '\\' && ws) {
+                    ++k;
+                    continue;
+                }
+                if (!ws)
+                    fail(file, at, "literal text `" + p.lit + "` in the format of `" + s.name + "`",
+                         "C would have to match it exactly in the input; clean reads whitespace-separated words.",
+                         "read everything with conversions separated by spaces, and handle the text yourself.");
+            }
+        }
+        s.pieces = std::move(f.pieces);
+        s.newline = f.newline;
+    }
+
+    // `scanf(fmt, &a, &b);` and `fscanf(f, fmt, &a);` — each conversion reads into a variable. The
+    // variable is `&x` (`%s` takes the string `x` itself). Which types fit which conversion is check.cpp's.
+    Stmt parseScan() {
+        Stmt s;
+        s.kind = Stmt::Kind::Scan;
+        s.loc = peek().loc;
+        s.name = toks[i++].text;
+        expectPunct("(", "after `" + s.name + "`");
+        if (s.name == "fscanf") {
+            s.hasStream = true;
+            s.stream = parseExpr();
+            expectPunct(",", "after the stream of `fscanf`");
+        }
+        Loc at = peek().loc;
+        parseScanFormat(s);
+        while (isPunct(",")) {
+            ++i;
+            s.targetLocs.push_back(peek().loc);
+            const bool amp = isPunct("&");
+            s.targetAddr.push_back(amp);
+            if (amp) ++i;
+            if (peek().kind != Token::Kind::Ident)
+                failHere("`" + s.name + "` reads into a variable, found " + describe(peek()),
+                         "the value has to be stored somewhere: a plain variable, `&x`.",
+                         "write `&name` (or just `name` for a `%s` string).");
+            s.targets.push_back(toks[i++].text);
+            if (isPunct("[") || isPunct("."))
+                failHere("`" + s.name + "` reads into an element or a field",
+                         "only whole variables can receive a value (`a = f(a)` in Lean).",
+                         "read into a local variable, then store it: `a[i] = x;`.");
+        }
+        size_t convs = 0;
+        for (const FmtPiece& p : s.pieces) convs += p.conv != 0;
+        if (convs != s.targets.size())
+            fail(file, at,
+                 "the format of `" + s.name + "` has " + std::to_string(convs) + " conversion(s) but " +
+                     std::to_string(s.targets.size()) + " variable(s) follow",
+                 "each conversion reads into one variable.", "make the number of variables match the conversions.");
+        expectPunct(")", "to close the argument list of `" + s.name + "`");
+        expectPunct(";", "after `" + s.name + "(…)`");
+        return s;
+    }
+
+    // `fgets(s, n, f);` — reads one line (at most n-1 characters, newline kept) into the string `s`.
+    Stmt parseReadLine() {
+        Stmt s;
+        s.kind = Stmt::Kind::ReadLine;
+        s.loc = peek().loc;
+        ++i;  // `fgets`
+        expectPunct("(", "after `fgets`");
+        Token target = expectIdent("the string variable `fgets` fills");
+        s.name = target.text;
+        expectPunct(",", "after the buffer of `fgets`");
+        s.args.push_back(parseExpr());
+        expectPunct(",", "after the size of `fgets`");
+        s.hasStream = true;
+        s.stream = parseExpr();
+        expectPunct(")", "to close the argument list of `fgets`");
+        expectPunct(";", "after `fgets(…)`");
+        return s;
+    }
+
+    // `fclose(f);`
+    Stmt parseClose() {
+        Stmt s;
+        s.kind = Stmt::Kind::Close;
+        s.loc = peek().loc;
+        ++i;  // `fclose`
+        expectPunct("(", "after `fclose`");
+        s.hasStream = true;
+        s.stream = parseExpr();
+        expectPunct(")", "to close the argument list of `fclose`");
+        expectPunct(";", "after `fclose(…)`");
+        return s;
+    }
+
+    // `exit(code);` — main-spec §8.1 (`IO.Process.exit`). check.cpp converts the status to the
+    // `UInt8` Lean wants, which is C's own "status mod 256".
+    Stmt parseExit() {
+        Stmt s;
+        s.kind = Stmt::Kind::Exit;
+        s.loc = peek().loc;
+        ++i;  // `exit`
+        expectPunct("(", "after `exit`");
+        s.expr = parseExpr();
+        expectPunct(")", "to close the argument list of `exit`");
+        expectPunct(";", "after `exit(…)`");
         return s;
     }
 
@@ -986,7 +1156,17 @@ struct Parser {
                      "labels exist only for `goto`, which main-spec §6 keeps ⛔.",
                      "drop the label; restructure with a loop, or an `if`/`else` chain.");
         if (atTypeWord()) parseCType();  // a type clean does not translate: refused with the reason
-        if (isPrintName(w) && peek2().kind == Token::Kind::Punct && peek2().text == "(") return parsePrint();
+        if (peek2().kind == Token::Kind::Punct && peek2().text == "(") {  // a library statement
+            switch (classifyLibName(w)) {
+            case LibName::Output:   return parsePrint();
+            case LibName::Exit:     return parseExit();
+            case LibName::Scan:     return parseScan();
+            case LibName::ReadLine: return parseReadLine();
+            case LibName::Close:    return parseClose();
+            case LibName::Value:    break;  // `getchar();` — an expression statement, check.cpp judges it
+            case LibName::None:     break;
+            }
+        }
         if (atAssignment()) return parseAssignment(true);
         if (peek2().kind == Token::Kind::Punct && peek2().text == "(") {  // `f(args);` (check.cpp: void only)
             s.kind = Stmt::Kind::CallStmt;
@@ -1075,7 +1255,7 @@ struct Parser {
 
     // ---- declarations --------------------------------------------------
 
-    std::vector<std::pair<Type, std::string>> parseParams() {
+    std::vector<std::pair<Type, std::string>> parseParams(bool isMain) {
         std::vector<std::pair<Type, std::string>> params;
         if (isIdent("void") && peek2().kind == Token::Kind::Punct && peek2().text == ")") {
             ++i;  // `void`
@@ -1096,8 +1276,11 @@ struct Parser {
                 parseArraySize();  // the size is not part of the type (§4.4)
                 ++brackets;
             }
-            Type ty = declare(base, stars, brackets, at, true);
-            if (stars == 1 && ty.kind == Type::Kind::Array) pointers.emplace_back(params.size(), at);
+            // `main(int argc, char **argv)` / `char *argv[]`: the one place an array of strings exists (§7.1)
+            const bool argvForm = isMain && base.kind == Type::Kind::Char &&
+                                  ((stars == 2 && brackets == 0) || (stars == 1 && brackets == 1));
+            Type ty = argvForm ? Type::arrayOf(Type::of(Type::Kind::String)) : declare(base, stars, brackets, at, true);
+            if (stars == 1 && ty.kind == Type::Kind::Array && !argvForm) pointers.emplace_back(params.size(), at);
             params.emplace_back(ty, name.text);
             if (isPunct(",")) {
                 ++i;
@@ -1197,7 +1380,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             ++p.i;
             continue;
         }
-        if (p.peek().kind == Token::Kind::Ident && isPrintName(p.peek().text) &&
+        if (p.peek().kind == Token::Kind::Ident && classifyLibName(p.peek().text) == LibName::Output &&
             p.peek2().kind == Token::Kind::Punct && p.peek2().text == "(") {  // script mode (§8.2)
             Stmt st = p.parsePrint();
             st.script = true;
@@ -1225,7 +1408,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         Token name = p.expectName("a function name");
         p.checkName(name);
         p.expectPunct("(", "to open the parameter list of `" + name.text + "`");
-        auto params = p.parseParams();
+        auto params = p.parseParams(name.text == "main");
         p.expectPunct(")", "to close the parameter list of `" + name.text + "`");
         if (p.isPunct(";")) {  // prototype: dropped (§7.1)
             if (hasAttr)

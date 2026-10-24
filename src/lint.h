@@ -15,6 +15,8 @@
 //   W007  `char` ↔ integer conversion                W011  string indexing is O(n)
 //   W014  `/` `%` on `Int` round differently from C when an operand is negative (D18)
 //   W006  `printf` width / flags / precision are ignored; `%f` is Lean's float text
+//   W015  `scanf`/`fscanf` read whole words and consume the whitespace after them (provisional)
+//   W016  `fopen` that fails stops the program, it does not return NULL (provisional)
 //
 // W003, W004 need features that do not exist yet (`long double` is spelled
 // away by the parser, no uninitialised locals).

@@ -1,0 +1,5 @@
+sum=15
+first: 7 8
+second: text line
+third starts with !
+through a variable

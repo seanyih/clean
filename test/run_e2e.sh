@@ -5,7 +5,16 @@
 #   1. translate it with release/clean;
 #   2. diff the output against test/cases/<name>.expected.lean (golden file);
 #   3. append test/cases/<name>.checks.lean (Lean `example`s) and type-check
-#      the combined file with `lean` — skipped, with a notice, if absent.
+#      the combined file with `lean` — skipped, with a notice, if absent;
+#   4. if test/cases/<name>.expected.out exists, RUN the translation
+#      (`lean --run`) and compare it with what the C program itself printed:
+#        <name>.stdin          standard input        (optional, default empty)
+#        <name>.args           command-line words     (optional)
+#        <name>.expected.out   expected stdout        (the switch for this step)
+#        <name>.expected.err   expected stderr        (optional, default empty)
+#        <name>.expected.code  expected exit code     (optional, default 0)
+#      The goldens come from the real C program: test/make_golden.sh <name>.
+#      The program runs in a scratch directory, so files it writes vanish.
 # For every test/cases-should-fail/*.c:
 #   expect the translator to exit 1 with a diagnostic on stderr.
 # For every test/cases-lint/*.c:
@@ -61,11 +70,49 @@ for src in "$cases"/*.c; do
     fi
     if [ "$have_lean" = 1 ] && [ -f "$cases/$name.checks.lean" ]; then
         cat "$tmp/$name.lean" "$cases/$name.checks.lean" > "$tmp/$name.checked.lean"
-        if ! lean "$tmp/$name.checked.lean" > "$tmp/$name.leancheck.log" 2>&1; then
+        if ! (cd "$tmp" && lean "$tmp/$name.checked.lean") > "$tmp/$name.leancheck.log" 2>&1; then
             echo "FAIL $name: generated Lean does not type-check"
             sed 's/^/    /' "$tmp/$name.leancheck.log"
             fail=$((fail + 1))
             continue
+        fi
+    fi
+    if [ -f "$cases/$name.expected.out" ]; then
+        if [ "$have_lean" = 0 ]; then
+            echo "SKIP $name: run step (lean not installed)"
+        else
+            work="$tmp/run-$name"
+            mkdir -p "$work"
+            stdin="$cases/$name.stdin"
+            [ -f "$stdin" ] || stdin=/dev/null
+            args=""
+            [ -f "$cases/$name.args" ] && args="$(cat "$cases/$name.args")"
+            # unused-variable warnings would land on stdout; they are not what is tested here
+            # shellcheck disable=SC2086
+            (cd "$work" && lean -D linter.unusedVariables=false --run "$tmp/$name.lean" $args \
+                < "$stdin" > "$tmp/$name.run.out" 2> "$tmp/$name.run.err")
+            code=$?
+            want_code=0
+            [ -f "$cases/$name.expected.code" ] && want_code="$(cat "$cases/$name.expected.code")"
+            want_err="$cases/$name.expected.err"
+            [ -f "$want_err" ] || want_err=/dev/null
+            if ! diff -u "$cases/$name.expected.out" "$tmp/$name.run.out" > "$tmp/$name.diff" 2>&1; then
+                echo "FAIL $name: stdout of the translated program differs from the C program's"
+                sed 's/^/    /' "$tmp/$name.diff" | head -20
+                fail=$((fail + 1))
+                continue
+            fi
+            if ! diff -u "$want_err" "$tmp/$name.run.err" > "$tmp/$name.diff" 2>&1; then
+                echo "FAIL $name: stderr of the translated program differs from the C program's"
+                sed 's/^/    /' "$tmp/$name.diff" | head -20
+                fail=$((fail + 1))
+                continue
+            fi
+            if [ "$code" != "$want_code" ]; then
+                echo "FAIL $name: exit code $code, the C program gave $want_code"
+                fail=$((fail + 1))
+                continue
+            fi
         fi
     fi
     echo "PASS $name"

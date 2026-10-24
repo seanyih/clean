@@ -31,6 +31,7 @@ struct Type {
         String,        // C `char *`, `char s[]`, string literals          → `String`
         Array,         // C `T a[N]`, `T *a`, `T a[M][N]`                   → `Array T`
         Unit,          // C `void` (return type only)                       → `Unit`
+        File,          // C `FILE *` (only ever as a pointer)               → `IO.FS.Stream`
     };
     Kind kind = Kind::Int;
     int width = 0;            // SInt/UInt: 8 16 32 64; BitVec: N; otherwise 0
@@ -57,6 +58,7 @@ bool isLiteral(Type t);   // Literal or FloatLiteral
 bool isFloat(Type t);     // Float32 / Float64 (not the literal)
 bool isArray(Type t);
 bool isString(Type t);
+bool isFile(Type t);
 
 // The Lean spelling: `Int`, `UInt8`, `BitVec 8`, `Float`, `Bool`, …
 std::string leanName(Type t);

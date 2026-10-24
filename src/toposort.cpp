@@ -71,7 +71,8 @@ void sortDefinitions(TranslationUnit& unit) {
     for (size_t i = 0; i < n; ++i) {
         std::vector<std::string> names;
         forEachExpr(unit.functions[i].body, [&](const Expr& e) { collectCalls(e, names); });
-        for (const std::string& name : names) t.callees[i].push_back(index.at(name));  // check.cpp vouched
+        for (const std::string& name : names)
+            if (index.count(name)) t.callees[i].push_back(index.at(name));  // else a library call (getchar, fopen, …)
     }
     for (size_t i = 0; i < n; ++i)
         if (t.index[i] < 0) t.visit(i);

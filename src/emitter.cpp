@@ -32,7 +32,8 @@
 //     `f x`; `printf`/`puts`/`putchar`/`fprintf(stderr, …)` become `IO.print`
 //     / `IO.println` / `IO.eprint` / `IO.eprintln` with the format turned into
 //     an `s!"…"` interpolation; file-scope ones become `#eval` after the
-//     functions (§8.2); `%x` uses a small generated `hexOf` helper;
+//     functions (§8.2); `%x` uses a small generated `hexOf` helper; `exit(n)` is
+//     `IO.Process.exit n` and, like `return`, ends its block (nothing follows);
 //   * comments travel with the tree and are printed at the nearest legal
 //     spot: `//` → `--`, `/* */` → `/- -/`, above the statement they belong
 //     to; the ones that closed a block or a file land there (see parser.h
@@ -43,6 +44,7 @@
 #include <cstdlib>
 #include <vector>
 
+#include "prelude.h"
 #include "types.h"
 
 namespace {
@@ -136,8 +138,11 @@ void emitExpr(const Expr& e, std::string& out) {
     case Expr::Kind::CharLit:
     case Expr::Kind::StringLit:
     case Expr::Kind::BoolLit:
-    case Expr::Kind::Ident:
         out += e.text;
+        return;
+    case Expr::Kind::Ident:  // `stdin` / `stdout` / `stderr` (check.cpp sets `io`): fetched when used
+        if (e.io) out += e.text == "stdin" ? "(← IO.getStdin)" : e.text == "stdout" ? "(← IO.getStdout)" : "(← IO.getStderr)";
+        else out += e.text;
         return;
     case Expr::Kind::Index:  // `a[i]!`, and on a string `s.toList[i]!` (main-spec §4.3, §4.4)
         emitAtom(e.kids[0], out);
@@ -414,7 +419,7 @@ void emitSwitch(const Stmt& s, int level, const std::string& wret, bool yield, s
 std::string spaced(const std::string& x) { return x.find(' ') == std::string::npos ? x : "(" + x + ")"; }
 
 bool hasIOCall(const Expr& e) {
-    if (e.kind == Expr::Kind::Call && e.io) return true;
+    if ((e.kind == Expr::Kind::Call || e.kind == Expr::Kind::Ident) && e.io) return true;  // a call, or `stdin`…
     for (const Expr& k : e.kids)
         if (hasIOCall(k)) return true;
     return false;
@@ -451,7 +456,7 @@ std::string convText(const FmtPiece& p, const Expr& a, bool ascribe) {
 bool inlined(const FmtPiece& p, const Expr& a) { return p.conv == 's' && a.kind == Expr::Kind::StringLit; }
 
 // The Lean string for a format: plain `"…"`, or `s!"…{x}…"` when some conversion needs a hole.
-std::string formatString(const Stmt& s) {
+std::string formatString(const Stmt& s, bool keepNewline = false) {
     bool holes = false;
     size_t k = 0;
     for (const FmtPiece& p : s.pieces)
@@ -475,6 +480,7 @@ std::string formatString(const Stmt& s) {
         else
             out += "{" + convText(p, a, true) + "}";
     }
+    if (keepNewline && s.newline) out += "\\n";  // a built string keeps its final newline
     return out + "\"";
 }
 
@@ -490,6 +496,15 @@ std::string printAction(const Stmt& s) {
     if (s.name == "puts" || s.name == "putchar") {
         emitAtom(s.args[0], arg);
         return std::string(s.name == "puts" ? "IO.println " : "IO.print ") + arg;
+    }
+    if (s.hasStream) {  // to a `FILE *` value: its `putStr`
+        std::string stream;
+        emitAtom(s.stream, stream);
+        if (s.name == "fputs" || s.name == "fputc" || s.name == "putc") {
+            emitAtom(s.args[0], arg);
+            return stream + ".putStr " + arg + (s.name == "fputs" ? "" : ".toString");
+        }
+        return stream + (s.newline ? ".putStrLn " : ".putStr ") + formatString(s);
     }
     bool newline = s.newline;
     // §8.2: at file scope, a format with holes becomes `IO.println` (the `#eval` output is line by line)
@@ -512,7 +527,7 @@ void emitScript(const Stmt& s, std::string& out) {
         out += "#eval " + convText(s.pieces[0], s.args[0], false) + "\n";
         return;
     }
-    bool io = false;
+    bool io = s.hasStream && hasIOCall(s.stream);
     for (const Expr& a : s.args) io = io || hasIOCall(a);
     out += io ? "#eval do\n  " + printAction(s) + "\n" : "#eval " + printAction(s) + "\n";
 }
@@ -604,8 +619,63 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
             out += "\n";
             break;
         case Stmt::Kind::Print:
-            out += pad(level) + printAction(s) + "\n";
+            if (!s.targets.empty()) {  // sprintf / snprintf: a string assignment (`snprintf` cuts to n-1)
+                std::string text = formatString(s, true);
+                if (s.hasLimit) {
+                    std::string n;
+                    emitAtom(s.limit, n);
+                    text = "((" + text + ").take (" + n + " - 1)).toString";  // `take` gives a `String.Slice`
+                }
+                out += pad(level) + s.targets[0] + " := " + text + "\n";
+            } else {
+                out += pad(level) + printAction(s) + "\n";
+            }
             break;
+        case Stmt::Kind::Scan: {  // each conversion reads one word into its variable (prelude.h scan*)
+            std::string from = "(← IO.getStdin)";
+            if (s.hasStream) {
+                from.clear();
+                emitAtom(s.stream, from);
+            }
+            for (size_t k = 0; k < s.targets.size(); ++k) {
+                const std::string& x = s.targets[k];
+                const Type t = s.targetTypes[k];
+                const char conv = [&] {
+                    size_t seen = 0;
+                    for (const FmtPiece& p : s.pieces)
+                        if (p.conv && seen++ == k) return p.conv;
+                    return '\0';
+                }();
+                out += pad(level);
+                if (conv == 's') out += x + " ← scanStr " + from + " " + x;
+                else if (conv == 'c') out += x + " ← " + (s.targetSkipWs[k] ? "scanCharWs " : "scanChar ") + from + " " + x;
+                else if (conv == 'f' && t.kind == Type::Kind::Float32)
+                    out += x + " := Float.toFloat32 (← scanFloat " + from + " (Float32.toFloat " + x + "))";
+                else if (conv == 'f') out += x + " ← scanFloat " + from + " " + x;
+                else out += x + " ← " + (t.kind == Type::Kind::Nat ? "scanNat " : "scanInt ") + from + " " + x;
+                out += "\n";
+            }
+            break;
+        }
+        case Stmt::Kind::ReadLine: {  // `fgets(s, n, f)` → `s ← fgets f n s`
+            std::string from, n;
+            emitAtom(s.stream, from);
+            emitAtom(s.args[0], n);
+            out += pad(level) + s.name + " ← fgets " + from + " " + n + " " + s.name + "\n";
+            break;
+        }
+        case Stmt::Kind::Close: {  // `fclose(f)` → `f.flush`: Lean closes a handle when it is dropped
+            std::string from;
+            emitAtom(s.stream, from);
+            out += pad(level) + from + ".flush\n";
+            break;
+        }
+        case Stmt::Kind::Exit: {  // `exit(n)` → `IO.Process.exit n` (the status is already a `UInt8`)
+            std::string code;
+            emitAtom(s.expr, code);
+            out += pad(level) + "IO.Process.exit " + code + "\n";
+            break;
+        }
         case Stmt::Kind::Return:
             out += pad(level) + "return ";
             if (s.noValue) out += wret.empty() ? "()" : wret;  // a writer returns its array
@@ -678,7 +748,8 @@ void emitStmts(const std::vector<Stmt>& list, int level, const std::string& wret
         return;
     }
     // A Lean `do` sequence cannot end in `let`, and cannot be empty.
-    if (list.empty() || list.back().kind == Stmt::Kind::Decl || list.back().kind == Stmt::Kind::CallStmt)
+    if (list.empty() || list.back().kind == Stmt::Kind::Decl || list.back().kind == Stmt::Kind::CallStmt ||
+        list.back().kind == Stmt::Kind::Scan || list.back().kind == Stmt::Kind::ReadLine)
         out += pad(level) + "pure ()\n";
 }
 
@@ -699,7 +770,9 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
 
     out += f.isPartial ? "partial def " : "def ";
     out += f.name;
-    if (!f.params.empty()) {
+    if (f.mainArgs) {  // `main (args : List String)`: argc and argv are built from it just below
+        out += " (args : List String)";
+    } else if (!f.params.empty()) {
         out += " (";
         bool first = true;
         size_t i = 0;
@@ -730,6 +803,10 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
         return;
     }
     out += f.isIO ? "do\n" : "Id.run do\n";
+    if (f.mainArgs) {  // C counts the program's own name as argv[0]; Lean does not pass it, so add it back
+        out += pad(1) + "let " + f.params[1].second + " : Array String := #[(← IO.appPath).toString] ++ args.toArray\n";
+        out += pad(1) + "let " + f.params[0].second + " : Int := " + f.params[1].second + ".size\n";
+    }
     for (const std::string& p : f.mutParams) {  // a parameter that is assigned (§3.3)
         Type ty;
         for (const auto& param : f.params)
@@ -745,9 +822,7 @@ std::string emit(const TranslationUnit& unit) {
     std::string out;
     out += "-- generated by clean from " + unit.fileName + " — do not edit\n";
     out += "set_option autoImplicit false\n";
-    if (unit.needsHexOf)
-        out += "\n-- helper for printf `%x` / `%X` (main-spec §8.1)\n"
-               "def hexOf (n : Nat) : String := (Nat.toDigits 16 n).asString\n";
+    out += helperDefinitions(helperClosure(unit.helpers));  // only the helpers the file uses
 
     size_t i = 0;
     while (i < unit.functions.size()) {

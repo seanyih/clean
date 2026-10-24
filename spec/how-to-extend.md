@@ -1,7 +1,7 @@
 # How to extend `clean` — a developer's manual
 
 For downstream developers: where a feature lives, which files to touch, and
-how to prove it works. State: slices 0–9 (2026-10-20). If the architecture
+how to prove it works. State: slices 0–9 (2026-10-24). If the architecture
 moves, update this file with your slice.
 
 ## The pipeline (src/)
@@ -30,6 +30,12 @@ moves, update this file with your slice.
       ▼
     emitter.cpp   AST → Lean text   (merged params, `-- c:` comments)
 
+- `builtins.h/.cpp` and `prelude.h/.cpp` — beside the pipeline too. `builtins`
+  is the one place that knows C *library names* (which start a statement,
+  which give a value, which constants exist); `prelude` holds the Lean text of
+  the helper `def`s a translation prints at its top (`hexOf`, `fgets`,
+  `scanInt`, …). `check.cpp` records which helpers a file uses
+  (`unit.helpers`), the emitter prints only those.
 - `types.h/.cpp` — beside the pipeline, not in it: the **only** file that
   names a C type, a Lean type, or a rule about mixing/converting them. The
   parser, checker and emitter ask it and never hardcode a type.
@@ -177,6 +183,27 @@ Prove it: drop the keyword into a `test/cases-should-fail/` case
    fall-through refusal E105).
 5. Tests + impl-spec as in recipe 1.
 
+## Recipe 3b — add a library function (`getchar`, `fopen`, `exit`, …)
+
+1. **builtins.cpp** — a row in `classifyLibName` (statement kinds: `Output`,
+   `Exit`, `Scan`, `ReadLine`, `Close`; or `Value` for a call that gives a
+   value, with its signature in `libSignature`). A name here is also refused
+   as a user function name. A macro constant (`EOF`) goes in `libraryConstant`.
+2. A **value** function needs nothing else in the parser; check.cpp `Call`
+   types it and sets `Expr::io`, the emitter prints `(← f x)`. A new
+   **statement** follows Recipe 3 (`Stmt::Kind`, `parseXxx`, `Checker::stmts`,
+   `emitList`), plus the three places that must know it is I/O: `hasPrint` and
+   `findIO` in check.cpp (a function that does it is `IO`), `forEachExpr` in
+   ast.h (so its expressions are visited).
+3. If the Lean spelling is more than one line, put it in **prelude.cpp** as a
+   helper (give it its `needs`), and have check.cpp insert its name into
+   `unit.helpers`.
+4. Prove it against real C: `test/cases/NAME.c`, optional `NAME.stdin` /
+   `NAME.args`, then `test/make_golden.sh NAME` writes `NAME.expected.out`
+   (+ `.err`, `.code`) **from gcc**, and `run_e2e.sh` demands the same from the
+   translation. Write the C so that gcc runs it cleanly (buffers big enough,
+   `-Wall` quiet): the oracle is only as good as the program.
+
 ## Recipe 4 — adopt a diagnostic code
 
 [error-codes.md](error-codes.md) is the catalogue plus a per-code status
@@ -197,6 +224,10 @@ silently, never guess (D5).
 - `test/cases/` — must translate; output is diffed against
   `<name>.expected.lean`; `<name>.checks.lean` is appended and the whole
   file is type-checked with `lean`.
+- `test/cases/` also has an optional **run** step: a case with
+  `NAME.expected.out` is executed with `lean --run` (stdin from `NAME.stdin`,
+  words from `NAME.args`) and must print what the C program printed (stdout,
+  stderr, exit code). Generate those files with `test/make_golden.sh NAME`.
 - `test/cases-should-fail/` — clean must exit 1 with a diagnostic.
 - `test/cases-lean-rejects/` — clean must succeed and `lean` must then refuse
   (things only Lean can judge, e.g. unproven termination).

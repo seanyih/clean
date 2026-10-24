@@ -107,13 +107,21 @@ struct Case {
 //                                   binds those to the switch, which clean cannot express)
 //   Continue `continue;`            legal only inside a loop (the parser checks)
 //   Print   `printf(…);` `puts(s);` `putchar(c);` `fprintf(stderr, …);`   (main-spec §8)
+//           `sprintf(buf, …);` `snprintf(buf, n, …);`   not I/O: `buf := s!"…"` (targets = [buf], limit = n)
 //                                   name = the C function, toStderr, pieces + newline (printf
 //                                   family), args = the arguments (printf: one per conversion;
 //                                   puts/putchar: the one value), script = at file scope
+//   Scan    `scanf(fmt, &a, &b);`   name = "scanf"/"fscanf", pieces (whitespace-only literals + the
+//           `fscanf(f, fmt, …);`    conversions), targets = the variables read into, one per conversion;
+//                                   stream when hasStream (fscanf), else standard input
+//   ReadLine `fgets(s, n, f);`      name = the variable `s` receives the line; args = [n]; stream
+//   Close   `fclose(f);`            stream
+//   Exit    `exit(code);`           expr = the status; the statement never returns, so
+//                                   check.cpp counts it as ending its block like `return`
 struct Stmt {
     enum class Kind {
         Decl, Assign, CallStmt, If, Return, Switch, Block, Break, Continue, While, DoWhile,
-        For, Print
+        For, Print, Exit, Scan, ReadLine, Close
     };
     Kind kind = Kind::Return;
     std::string name;
@@ -138,7 +146,18 @@ struct Stmt {
     bool newline = false;             // Print (printf, fprintf): the format ended in `\n` (cut off)
     bool toStderr = false;            // Print: `fprintf(stderr, …)`
     bool script = false;              // Print: at file scope, becomes `#eval` (§8.2)
-    std::vector<Expr> args;           // Print: the arguments after the format
+    std::vector<Expr> args;           // Print: the arguments after the format; ReadLine: [n]
+    Expr stream;                      // the FILE * the statement works on (when hasStream)
+    bool hasStream = false;           // Print: fprintf/fputs/fputc to a stream value; Scan: fscanf;
+                                      // ReadLine, Close: always. Print/Scan without one use stdout/stdin.
+    Expr limit;                       // Print (snprintf): the size n; the text is cut to n-1 characters
+    bool hasLimit = false;
+    std::vector<std::string> targets; // Print (sprintf, snprintf): the string variable that receives the text.
+                                      // Scan: the variable each conversion stores into
+    std::vector<Loc> targetLocs;      // Scan: where each target was written
+    std::vector<Type> targetTypes;    // Scan: the declared type of each target (check.cpp)
+    std::vector<bool> targetSkipWs;   // Scan: whitespace precedes this `%c` in the format (` %c` skips it)
+    std::vector<bool> targetAddr;     // Scan: the target was written `&x` (a `%s` string is written bare)
     std::vector<Comment> comments;    // comments the parser attached to this statement
     std::vector<Comment> bodyTrailing; // If: before the then-branch's `}`; Block: before its `}`
     std::vector<Comment> elseTrailing; // If: before the else-branch's `}`
@@ -154,6 +173,8 @@ void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
         for (const Expr& ix : s.indices) f(ix);
         const bool noExpr = s.kind == Stmt::Kind::Block || s.kind == Stmt::Kind::Break ||
                             s.kind == Stmt::Kind::Continue || s.kind == Stmt::Kind::Print ||
+                            s.kind == Stmt::Kind::Scan || s.kind == Stmt::Kind::ReadLine ||
+                            s.kind == Stmt::Kind::Close ||
                             (s.kind == Stmt::Kind::Decl && s.noInit) ||
                             (s.kind == Stmt::Kind::Return && s.noValue);
         if (!noExpr) f(s.expr);
@@ -166,6 +187,8 @@ void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
             f(part.expr);
         }
         for (const Expr& a : s.args) f(a);
+        if (s.hasStream) f(s.stream);
+        if (s.hasLimit) f(s.limit);
         forEachExpr(s.body, f);
         forEachExpr(s.elseBody, f);
         for (const Case& c : s.cases) forEachExpr(c.body, f);
@@ -186,6 +209,8 @@ struct Function {
     int writerParam = -1;               // `void` function that writes exactly one array parameter
                                        // (OD11 c, check.cpp): that parameter's index; -1 = none.
                                        // The emitter returns the modified array instead of Unit.
+    bool mainArgs = false;              // `int main(int argc, char *argv[])`: params are (argc, argv), emitted as
+                                       // `main (args : List String)` plus two lets (check.cpp prepareMain)
     bool isIO = false;                  // prints, or calls something that does; `main` always (check.cpp)
                                        // → `: IO T := do` (main-spec §3.3)
     bool recursive = false;             // reaches itself through calls (toposort.cpp)
@@ -200,5 +225,5 @@ struct TranslationUnit {
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build
     std::vector<Comment> trailingComments;  // comments after the last definition
     std::vector<Stmt> scripts;          // file-scope `printf` etc. (§8.2), source order; emitted as `#eval` after the functions
-    bool needsHexOf = false;            // some `%x` needs the generated `hexOf` helper (check.cpp)
+    std::set<std::string> helpers;      // generated Lean helpers the file needs, e.g. "hexOf" (check.cpp; prelude.h)
 };

@@ -126,6 +126,13 @@ struct Linter {
                        "make sure the value is non-negative, or keep it signed.");
             break;
         }
+        case Expr::Kind::Call:
+            if (e.text == "fopen")
+                report("W016", e.loc, "`fopen` that fails stops the program",
+                       "C returns `NULL` and lets the program carry on; Lean's `IO.FS.Handle.mk` raises an error, "
+                       "and clean has no `NULL` to test for.",
+                       "make sure the file exists before running (the check `if (f == NULL)` is refused).");
+            break;
         case Expr::Kind::Index:
             if (e.kids[0].type.kind == Type::Kind::String)
                 report("W011", e.loc, "indexing a string is O(n)",
@@ -158,6 +165,14 @@ struct Linter {
                        "(reading `a[i]!` panics instead).",
                        "guard the index with a comparison "
                        "(the `--index=proof` option of main-spec §10 is not built yet).");
+            if (s.kind == Stmt::Kind::Scan)
+                report("W015", s.loc, "`" + s.name + "` reads whole whitespace-separated words",
+                       "C reads only as many characters as the conversion accepts (`%d` on `1.5` takes `1` and "
+                       "leaves `.5`) and leaves the whitespace after it unread; clean takes the whole word, so "
+                       "a word that is not entirely a number reads nothing, and the following `fgets`/`getchar` "
+                       "starts after the whitespace.",
+                       "put every value on its own whitespace-separated word, and read a line with `fgets` "
+                       "instead of mixing it with `scanf`.");
             if (s.kind == Stmt::Kind::Print) {
                 bool simplified = false;
                 for (const FmtPiece& p : s.pieces) simplified = simplified || p.padded || p.conv == 'f';

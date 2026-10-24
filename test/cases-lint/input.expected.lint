@@ -1,0 +1,9 @@
+W001  input.c:9:9  `int c` is an `int`: Lean's `Int` is unbounded
+      why:  C's `int` wraps at 32 bits; clean maps the `int` family to `Int` and emulates nothing (D4).
+      fix:  use `int32_t` (or another `intN_t`) where a fixed width is meant.
+W015  input.c:15:5  `scanf` reads whole whitespace-separated words  (+1 more in this file)
+      why:  C reads only as many characters as the conversion accepts (`%d` on `1.5` takes `1` and leaves `.5`) and leaves the whitespace after it unread; clean takes the whole word, so a word that is not entirely a number reads nothing, and the following `fgets`/`getchar` starts after the whitespace.
+      fix:  put every value on its own whitespace-separated word, and read a line with `fgets` instead of mixing it with `scanf`.
+W016  input.c:20:15  `fopen` that fails stops the program  (+1 more in this file)
+      why:  C returns `NULL` and lets the program carry on; Lean's `IO.FS.Handle.mk` raises an error, and clean has no `NULL` to test for.
+      fix:  make sure the file exists before running (the check `if (f == NULL)` is refused).

@@ -2,7 +2,7 @@
 set_option autoImplicit false
 
 -- helper for printf `%x` / `%X` (main-spec §8.1)
-def hexOf (n : Nat) : String := (Nat.toDigits 16 n).asString
+def hexOf (n : Nat) : String := String.ofList (Nat.toDigits 16 n)
 
 -- c: io_script.c:6
 -- Bare printf at file scope → `#eval` (main-spec §8.2). Exactly one specifier

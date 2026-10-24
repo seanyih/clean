@@ -20,6 +20,9 @@
 #include <map>
 #include <set>
 
+#include "builtins.h"
+#include "prelude.h"
+
 namespace {
 
 [[noreturn]] void failCode(const char* code, const std::string& file, Loc loc,
@@ -40,6 +43,7 @@ bool returnsOnAllPaths(const std::vector<Stmt>& list);
 bool stmtReturns(const Stmt& s) {
     switch (s.kind) {
     case Stmt::Kind::Return:
+    case Stmt::Kind::Exit:  // `exit(n)` never comes back: like a `return`, nothing may follow it
         return true;
     case Stmt::Kind::If:
         return !s.elseBody.empty() && returnsOnAllPaths(s.body) && returnsOnAllPaths(s.elseBody);
@@ -391,13 +395,13 @@ void findWriters(TranslationUnit& unit, const std::string& file) {
 // edges, so it is a fixpoint over the whole file, run before the per-function
 // checks (which need to know which calls need `(← f x)`).
 
-bool isPrintFunction(const std::string& name) {
-    return name == "printf" || name == "puts" || name == "putchar" || name == "fprintf";
-}
-
+// A statement that is I/O by itself: printing, reading, closing a stream, or leaving the program.
 bool hasPrint(const std::vector<Stmt>& list) {
     for (const Stmt& s : list) {
-        if (s.kind == Stmt::Kind::Print) return true;
+        if ((s.kind == Stmt::Kind::Print && s.targets.empty()) ||  // sprintf / snprintf only build a string
+            s.kind == Stmt::Kind::Exit || s.kind == Stmt::Kind::Scan ||
+            s.kind == Stmt::Kind::ReadLine || s.kind == Stmt::Kind::Close)
+            return true;
         if (hasPrint(s.body) || hasPrint(s.elseBody)) return true;
         for (const Case& c : s.cases)
             if (hasPrint(c.body)) return true;
@@ -413,7 +417,7 @@ bool callsAny(const Expr& e, const std::set<std::string>& names) {
 }
 
 void findIO(TranslationUnit& unit) {
-    std::set<std::string> io;
+    std::set<std::string> io = {"getchar", "fgetc", "getc", "fopen"};  // library calls that touch a stream
     for (Function& f : unit.functions) {
         f.isIO = f.name == "main" || hasPrint(f.body);
         if (f.isIO) io.insert(f.name);
@@ -440,11 +444,16 @@ void prepareMain(TranslationUnit& unit) {
     for (Function& f : unit.functions) {
         if (f.name != "main") continue;
         const Loc at{f.defLine, 1};
-        if (!f.params.empty())
-            fail(unit.fileName, at, "`main` takes parameters",
-                 "`main(int argc, char **argv)` needs `List String` arguments and pointer-to-pointer, "
-                 "which main-spec §7.1 keeps 🟡.",
-                 "write `int main(void)`.");
+        if (!f.params.empty()) {  // exactly `(int argc, char *argv[])` (the parser typed argv as Array String)
+            const bool ok = f.params.size() == 2 && f.params[0].first.kind == Type::Kind::Int &&
+                            f.params[1].first == Type::arrayOf(Type::of(Type::Kind::String));
+            if (!ok)
+                fail(unit.fileName, at, "`main` takes parameters other than `(int argc, char *argv[])`",
+                     "Lean's `main` gets the arguments as one `List String`; clean builds `argc` and `argv` from it, "
+                     "and only in that pair.",
+                     "write `int main(void)` or `int main(int argc, char *argv[])`.");
+            f.mainArgs = true;
+        }
         if (f.retType.kind == Type::Kind::Int) {
             f.retType = Type::of(Type::Kind::UInt, 32);  // `IO UInt32`
             if (!returnsOnAllPaths(f.body)) {
@@ -486,7 +495,7 @@ struct Checker {
     const std::set<std::string>& pragmas;    // `#pragma lean …` words
     std::vector<DiagError>& notes;           // hints (H…) the unit carries to main
     const std::map<std::string, int>& writers;  // name → written array parameter's index (OD11 c)
-    bool& usesHex;                              // a `%x` that needs the `hexOf` helper was seen
+    std::set<std::string>& helpers;             // the generated helpers this file needs (prelude.h)
     // scopes[0] holds the parameters and the function's top-level locals.
     std::vector<std::map<std::string, Var>> scopes;
     std::vector<bool> bare;  // per scope: opened by a bare `{ }` block (flattened in Lean)
@@ -587,6 +596,15 @@ struct Checker {
         case Expr::Kind::Ident: {
             Var v;
             if (lookup(e.text, v)) return v.type;
+            if (isStandardStream(e.text)) {  // `(← IO.getStdin)` and friends: reading the stream is an action
+                e.io = true;
+                return Type::of(Type::Kind::File);
+            }
+            if (e.text == "NULL")
+                fail(file, e.loc, "`NULL` is used",
+                     "clean has no null pointers: `fopen` that fails stops the program with an error, "
+                     "and strings and arrays are never null.",
+                     "remove the check.");
             if (sigs.count(e.text))
                 fail(file, e.loc, "function `" + e.text + "` is used as a value",
                      "there are no function values (function pointers are ⛔ in the main spec).",
@@ -641,7 +659,30 @@ struct Checker {
                 fail(file, e.loc, "variable `" + e.text + "` is called like a function",
                      "function values are not translated.",
                      "call a defined function, or drop the call.");
-            if (isPrintFunction(e.text))
+            LibSignature lib;
+            if (libSignature(e.text, lib)) {
+                if (lib.params.size() != e.kids.size())
+                    fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(lib.params.size()) +
+                             " argument(s) but is called with " + std::to_string(e.kids.size()),
+                         "the arity is checked here so that Lean does not have to report it.",
+                         "match the C library's signature.");
+                for (size_t k = 0; k < e.kids.size(); ++k) valueAs(e.kids[k], lib.params[k]);
+                if (e.text == "fgetc" || e.text == "getc") streamDirection(e.kids[0], false, e.text);
+                if (e.text == "getc") e.text = "fgetc";  // the same function
+                if (e.text == "fopen") {  // the mode has to be known now: it picks the Lean `Mode`
+                    const Expr& m = e.kids[1];
+                    const std::string mode = m.kind == Expr::Kind::StringLit ? m.text.substr(1, m.text.size() - 2) : "";
+                    if (mode != "r" && mode != "w" && mode != "a" && mode != "rb" && mode != "wb" && mode != "ab")
+                        fail(file, m.loc, "`fopen` with a mode clean does not translate",
+                             "only the plain modes \"r\", \"w\" and \"a\" (also with `b`) exist; "
+                             "update modes (`+`) need a read-write handle, which is not built.",
+                             "use \"r\", \"w\" or \"a\" as a string literal.");
+                }
+                e.io = true;
+                helpers.insert(e.text);  // getchar, fgetc, fopen: each is a generated helper (prelude.h)
+                return lib.ret;
+            }
+            if (isLibraryName(e.text))
                 fail(file, e.loc, "the result of `" + e.text + "(…)` is used as a value",
                      "`" + e.text + "` is translated as an `IO` action, which has no number to give back.",
                      "call it as a statement, on its own line.");
@@ -1077,11 +1118,28 @@ struct Checker {
     // kind its conversion reads. Mixed types are converted as everywhere (D19); what has no
     // sensible reading (a `bool` for `%d`, an `int` for `%f`) is refused, not guessed.
     void printStmt(Stmt& s) {
-        if (s.name == "puts") {
+        if (!s.targets.empty()) {  // sprintf / snprintf: `buf := s!"…"`, a plain string assignment
+            Var v;
+            if (!lookup(s.targets[0], v))
+                fail(file, s.targetLocs[0], "`" + s.targets[0] + "` is not declared",
+                     "clean rejects unknown names instead of emitting Lean that fails later (D5).",
+                     "declare it first: `char " + s.targets[0] + "[64] = \"\";`.");
+            if (v.type.kind != Type::Kind::String)
+                fail(file, s.targetLocs[0], "`" + s.name + "` fills `" + s.targets[0] + "`, which is a `" + cName(v.type) + "`",
+                     "the text is a Lean `String`; arrays of characters are not translated.",
+                     "declare it as a string: `char " + s.targets[0] + "[64] = \"\";`.");
+            if (s.hasLimit) valueAs(s.limit, Type::of(Type::Kind::Nat));
+            markAssigned(s.targets[0], s.targetLocs[0]);
+        }
+        if (s.hasStream) {
+            valueAs(s.stream, Type::of(Type::Kind::File));
+            streamDirection(s.stream, true, s.name);
+        }
+        if (s.name == "puts" || s.name == "fputs") {
             valueAs(s.args[0], Type::of(Type::Kind::String));
             return;
         }
-        if (s.name == "putchar") {
+        if (s.name == "putchar" || s.name == "fputc" || s.name == "putc") {
             valueAs(s.args[0], Type::of(Type::Kind::Char));
             return;
         }
@@ -1131,11 +1189,11 @@ struct Checker {
                 case Type::Kind::BitVec:  // `x.toHex`: no helper needed
                     break;
                 case Type::Kind::Literal: case Type::Kind::Nat:
-                    usesHex = true;
+                    helpers.insert("hexOf");
                     break;
                 case Type::Kind::Int: case Type::Kind::SInt: case Type::Kind::UInt:
                     coerce(a, nat);  // the digits of the number (a negative `int` clamps to 0, lint W009)
-                    usesHex = true;
+                    helpers.insert("hexOf");
                     break;
                 default:
                     refuse(t, "`%x` prints an integer in hexadecimal.",
@@ -1147,9 +1205,115 @@ struct Checker {
         }
     }
 
+    // A stream used for writing must not be `stdin`; one used for reading must not be `stdout` /
+    // `stderr`. Only the three standard streams are known by name; a `FILE *` variable is trusted
+    // (Lean reports a wrong-direction handle when the program runs).
+    void streamDirection(const Expr& stream, bool writing, const std::string& fn) {
+        if (stream.kind != Expr::Kind::Ident || !stream.io) return;
+        if (writing && stream.text == "stdin")
+            fail(file, stream.loc, "`" + fn + "` writes to `stdin`", "standard input can only be read.",
+                 "write to `stdout` or `stderr`, or to a file you opened with \"w\".");
+        if (!writing && stream.text != "stdin")
+            fail(file, stream.loc, "`" + fn + "` reads from `" + stream.text + "`",
+                 "standard output and error can only be written.",
+                 "read from `stdin`, or from a file you opened with \"r\".");
+    }
+
+    // `scanf` / `fscanf` (main-spec §8.1, §12.6): each conversion reads one word of the input into
+    // the variable it names. The variable keeps its value when nothing could be read (end of input,
+    // or a word that is not a number), which is what C does too. The type decides how the word is read.
+    void scanStmt(Stmt& s) {
+        if (s.hasStream) {
+            valueAs(s.stream, Type::of(Type::Kind::File));
+            streamDirection(s.stream, false, s.name);
+        }
+        size_t next = 0;
+        bool spaceBefore = false;  // a whitespace literal came right before the conversion
+        for (const FmtPiece& p : s.pieces) {
+            if (!p.conv) {
+                spaceBefore = true;
+                continue;
+            }
+            const size_t k = next++;
+            s.targetSkipWs.push_back(spaceBefore);
+            spaceBefore = false;
+            const std::string& name = s.targets[k];
+            const Loc at = s.targetLocs[k];
+            Var v;
+            if (!lookup(name, v))
+                fail(file, at, "`" + name + "` is not declared",
+                     "clean rejects unknown names instead of emitting Lean that fails later (D5).",
+                     "declare it first: `int " + name + " = 0;`.");
+            const std::string conv = "%" + std::string(1, p.conv == 'f' ? 'f' : p.conv);
+            auto bad = [&](const std::string& why, const std::string& fix) {
+                fail(file, at, "`" + name + "` (`" + cName(v.type) + "`) is read with `" + conv + "`", why, fix);
+            };
+            const bool strConv = p.conv == 's';
+            if (strConv == s.targetAddr[k])
+                fail(file, at, strConv ? "`&` before the string `" + name + "`" : "`" + name + "` is read without `&`",
+                     strConv ? "a `char` string is not stored through its address in clean; `%s` takes the name itself."
+                             : "the conversion stores into the variable, so C needs its address.",
+                     strConv ? "write `" + name + "`." : "write `&" + name + "`.");
+            switch (p.conv) {
+            case 'd':
+                if (v.type.kind != Type::Kind::Int && v.type.kind != Type::Kind::Nat)
+                    bad("`%d` reads an integer into an `int` (or `unsigned`); other types need a conversion "
+                        "clean does not guess.",
+                        "read into an `int`, then convert: `x = (T)n;`.");
+                break;
+            case 'u':
+                if (v.type.kind != Type::Kind::Nat && v.type.kind != Type::Kind::Int)
+                    bad("`%u` reads a non-negative integer into an `unsigned` (or `int`).",
+                        "read into an `unsigned`, then convert.");
+                break;
+            case 'f':
+                if (!isFloat(v.type))
+                    bad("`%f` `%g` `%e` read a floating-point number into a `float` or `double`.",
+                        "declare the variable as `double`.");
+                break;
+            case 's':
+                if (v.type.kind != Type::Kind::String)
+                    bad("`%s` reads a word into a string (`char *`).", "declare the variable as `char s[] = \"\";`.");
+                break;
+            case 'c':
+                if (v.type.kind != Type::Kind::Char)
+                    bad("`%c` reads one character into a `char`.", "declare the variable as `char`.");
+                break;
+            }
+            s.targetTypes.push_back(v.type);
+            helpers.insert(p.conv == 'd' || p.conv == 'u' ? (v.type.kind == Type::Kind::Nat ? "scanNat" : "scanInt")
+                           : p.conv == 'f' ? "scanFloat" : p.conv == 's' ? "scanStr"
+                           : s.targetSkipWs[k] ? "scanCharWs" : "scanChar");
+            markAssigned(name, at);  // `let mut` / a `let mut` copy of a parameter
+        }
+    }
+
+    // `fgets(s, n, f);` reads a line into the string variable `s`.
+    void readLineStmt(Stmt& s) {
+        valueAs(s.stream, Type::of(Type::Kind::File));
+        streamDirection(s.stream, false, "fgets");
+        valueAs(s.args[0], Type::of(Type::Kind::Nat));
+        Var v;
+        if (!lookup(s.name, v))
+            fail(file, s.loc, "`" + s.name + "` is not declared",
+                 "clean rejects unknown names instead of emitting Lean that fails later (D5).",
+                 "declare it first: `char " + s.name + "[] = \"\";`.");
+        if (v.type.kind != Type::Kind::String)
+            fail(file, s.loc, "`fgets` fills `" + s.name + "`, which is a `" + cName(v.type) + "`",
+                 "a line is a Lean `String`; arrays of characters are not translated.",
+                 "declare it as a string: `char " + s.name + "[] = \"\";`.");
+        helpers.insert("fgets");
+        markAssigned(s.name, s.loc);
+    }
+
     void stmts(std::vector<Stmt>& list) {
         bool dead = false;
+        bool deadByExit = false;  // what ended the block: `exit(…)`, or `return` (and the like)
         for (Stmt& s : list) {
+            if (dead && deadByExit)
+                fail(file, s.loc, "unreachable code after `exit`",
+                     "the program ends at `exit`, so this code can never run.",
+                     "delete it, or move the `exit` below it.");
             if (dead)
                 fail(file, s.loc, "unreachable code after `return`",
                      "Lean rejects statements after a `return` in the same block.",
@@ -1230,8 +1394,23 @@ struct Checker {
             case Stmt::Kind::Print:
                 printStmt(s);
                 break;
+            case Stmt::Kind::Scan:
+                scanStmt(s);
+                break;
+            case Stmt::Kind::ReadLine:
+                readLineStmt(s);
+                break;
+            case Stmt::Kind::Close:
+                valueAs(s.stream, Type::of(Type::Kind::File));
+                break;
+            case Stmt::Kind::Exit:  // Lean's `IO.Process.exit` takes a `UInt8`: C's "status mod 256"
+                valueAs(s.expr, Type::of(Type::Kind::UInt, 8));
+                break;
             }
-            if (stmtReturns(s)) dead = true;
+            if (stmtReturns(s)) {
+                dead = true;
+                deadByExit = s.kind == Stmt::Kind::Exit;
+            }
         }
     }
 
@@ -1258,9 +1437,9 @@ struct Checker {
 
 void check(TranslationUnit& unit) {
     for (const Function& f : unit.functions)
-        if (isPrintFunction(f.name))
+        if (isLibraryName(f.name))
             fail(unit.fileName, Loc{f.defLine, 1}, "`" + f.name + "` is defined in this file",
-                 "clean translates calls to `" + f.name + "` as console output (main-spec §8.1), "
+                 "clean translates calls to `" + f.name + "` as the C library function (main-spec §8.1), "
                  "so a function of that name would never be called.",
                  "rename the function.");
     prepareMain(unit);  // `int main` → `IO UInt32`, before the signatures are taken
@@ -1281,7 +1460,7 @@ void check(TranslationUnit& unit) {
     for (const Function& f : unit.functions)
         if (f.writerParam >= 0) writers[f.name] = f.writerParam;
     for (Function& f : unit.functions)
-        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.needsHexOf, {}, {}}.run();
+        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.helpers, {}, {}}.run();
 
     // File-scope `printf` etc. (main-spec §8.2): checked like the body of a `void` function with
     // no parameters, so names, types and arities get the same treatment.
@@ -1290,14 +1469,15 @@ void check(TranslationUnit& unit) {
         script.name = "<file scope>";
         script.retType = Type::of(Type::Kind::Unit);
         script.body = std::move(unit.scripts);
-        Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.needsHexOf, {}, {}}.run();
+        Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.helpers, {}, {}}.run();
         unit.scripts = std::move(script.body);
     }
 
-    if (unit.needsHexOf)  // the generated helper's name must be free
+    for (const std::string& h : helperClosure(unit.helpers))  // a generated helper's name must be free
         for (const Function& f : unit.functions)
-            if (f.name == "hexOf")
-                fail(unit.fileName, Loc{f.defLine, 1}, "`hexOf` is defined, and `%x` needs a helper of that name",
-                     "clean writes `def hexOf` into the output for `printf(\"%x\", …)` (main-spec §8.1).",
+            if (f.name == h)
+                fail(unit.fileName, Loc{f.defLine, 1},
+                     "`" + h + "` is defined, and the translation needs a helper of that name",
+                     "clean writes `def " + h + "` into the output (see the top of the generated file).",
                      "rename your function.");
 }

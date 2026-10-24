@@ -9,9 +9,12 @@ and §4.3–4.4 except structs/enums/typedefs: integers, `intN_t`/`uintN_t`,
 locals, `if`, `switch` (on `int`/`unsigned`), **loops (main-spec §6:
 range-`for`, general `for`, `while`, `do … while`, `break`/`continue`)**,
 casts, automatic conversions between mixed types (D19), recursion, the opt-in
-`--lint=c-semantics` (D18), `void` array writers (OD11 c → D20), and console
+`--lint=c-semantics` (D18), `void` array writers (OD11 c → D20), console
 output with `IO` (main-spec §8: `printf`, `puts`, `putchar`,
-`fprintf(stderr, …)`, `main`). Adding a type is one table
+`fprintf(stderr, …)`, `main`), and **input and files**: `scanf`, `getchar`,
+`fgets`, `FILE *` with `fopen`/`fclose`/`fprintf`/`fscanf`/…, `exit`,
+`sprintf`, `main(argc, argv)` (see **Input and files** below), which loops
+turn into read-until-EOF programs. Adding a type is one table
 row plus a few `case`s: see
 [how-to-extend.md](how-to-extend.md).
 
@@ -231,6 +234,57 @@ s!"v={f 3}"`). `#eval` output appears when Lean checks the file, not when a
 program runs. If an argument calls an `IO` function the statement becomes
 `#eval do …`.
 
+**Input and files** (main-spec §8.1 🟡 rows, §12.6; slice 9). Everything that
+reads or touches a stream is `IO`, exactly like printing. `FILE *` is the type
+`IO.FS.Stream`; `stdin`, `stdout`, `stderr` are streams you can keep in a
+variable (`FILE *e = stderr;`).
+
+| C                                          | Lean                                                      |
+| ------------------------------------------ | --------------------------------------------------------- |
+| `scanf("%d %lf", &a, &d);`                 | `a ← scanInt (← IO.getStdin) a` … one line per conversion |
+| `fscanf(f, "%s", w);`                      | `w ← scanStr f w`                                         |
+| `fgets(s, n, f);`                          | `s ← fgets f n s`                                         |
+| `int c = getchar();` / `fgetc(f)` / `getc` | `(← getchar)` / `(← fgetc f)` (an `Int`, `-1` = `EOF`)    |
+| `FILE *f = fopen(path, "w");`              | `let f : IO.FS.Stream := (← fopen path "w")`              |
+| `fclose(f);`                               | `f.flush`                                                 |
+| `fprintf(f, …);` `fputs(s, f);` `fputc(c, f);` | `f.putStr …` / `f.putStrLn …` / `f.putStr c.toString`  |
+| `sprintf(buf, …);`                         | `buf := s!"…"` (not `IO`; a final `\n` is kept)           |
+| `snprintf(buf, n, …);`                     | `buf := ((s!"…").take (n - 1)).toString` (cut to n-1)     |
+| `exit(n);`                                 | `IO.Process.exit (UInt8…)`; like `return` it ends the block |
+| `int main(int argc, char *argv[])`         | `def main (args : List String)` + `argv`, `argc` rebuilt  |
+
+*How reading works.* A conversion reads **one whitespace-separated word** and
+stores it: `%d`/`%u` into an `int`/`unsigned`, `%f`/`%lf` into a
+`float`/`double`, `%s` into a string, `%c` into a `char` (` %c` skips
+whitespace first, as in C). The target is a plain variable: `&x` for numbers,
+`s` for `%s`. If nothing can be read (end of input, or a word that is not a
+number) the variable **keeps its value**, as in C, so give it one. The format
+may only have whitespace between conversions. `fgets(s, n, f)` reads one line,
+at most n-1 bytes, newline kept, into the string `s`; at end of input `s` is
+left alone. A buffer is written `char buf[64] = "";` (it is a `String`; the
+size is not used). `fopen` takes `"r"`, `"w"`, `"a"` (also with `b`) as a
+literal.
+
+*Left out on purpose* (each is a refusal with a fix): the value `scanf`,
+`sprintf`, … return; `NULL` and any comparison of streams; `fopen` modes with
+`+`; `%x`, widths and literal text in a `scanf` format; reading into array
+elements or fields; `fgets` into anything but a string; writing to `stdin`,
+reading from `stdout`/`stderr`; `main` with any other parameters; arrays of
+strings other than `argv`.
+
+*What differs from C* (lints **W015**, **W016**, both provisional, see
+open-decisions.md): `scanf` takes whole words and also consumes the whitespace
+after them, where C stops at the first character the conversion cannot use and
+leaves the rest. So `scanf("%d")` on `1.5` reads nothing here (C reads 1), and
+a `scanf` followed by `fgets` starts on the next line (C would see the leftover
+newline). A failing `fopen` stops the program with an error; C returns `NULL`.
+`argv[0]` is the path of the Lean program, not of the C one. `snprintf` cuts
+the text to `n-1` characters.
+
+The Lean helpers (`fgets`, `scanInt`, `parseFloat`, `hexOf`, …) are small
+`def`s printed at the top of the output, only the ones the file uses; their
+text lives in `src/prelude.cpp`. A function of the same name is refused.
+
 **Switch.** The scrutinee is `int` or `unsigned` (match patterns on the other
 types are unverified). Labels are integer literals (`3`, `-1`, `0x10`). Labels that
 follow each other become one or-pattern. Each case ends with `break;`, a
@@ -294,8 +348,8 @@ Not translated yet (each is a hard error with location + why + fix):
 `goto` and labels (**E102** — permanent, main-spec §6), structs, enums,
 typedefs, unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types
-other than `int`/`unsigned`, `scanf`/`getchar`/`fgets`, file I/O, `exit`,
-`main(argc, argv)`, `sprintf`/`snprintf`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
+other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
+`atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
 one is an error, not a silent wrong name), Sparkle, theorems.
 
 Diagnostic codes: **E102** (`goto`/labels), **E103** (assignment as
@@ -311,9 +365,13 @@ build"); real codes arrive with the features they guard.
 
 ## How the tool is put together
 
-Seven layers, one direction, no cleverness. `types.cpp` sits beside them: the
-one place that knows C type spellings, Lean type names, and how types mix,
-convert and print as tests. The layers ask it; none of them names a type.
+Seven layers, one direction, no cleverness. Three files sit beside them:
+`types.cpp` is the one place that knows C type spellings, Lean type names, and
+how types mix, convert and print as tests; `builtins.cpp` is the one place that
+knows C library *names* (which are statements, which give a value, which
+constants exist); `prelude.cpp` holds the Lean text of the generated helper
+`def`s. The layers ask them; none of them names a type, a library function or
+a helper's text.
 
     main.cpp     driver — read input.c, run the layers, write output.lean
       │
@@ -347,6 +405,11 @@ convert and print as tests. The layers ask it; none of them names a type.
   type → Lean name, `unify` (the common type of `a + b`), per-type operator
   rules, `flowKind`/`convert` (casts and implicit conversions), `truthTest`,
   `zeroValue`.
+- `builtins.h` — `classifyLibName` (printf-family, `exit`, `scanf`, `fgets`,
+  `fclose`, `getchar`…), the signatures of the ones that give a value, and the
+  library constants (`EOF`, `EXIT_FAILURE`).
+- `prelude.h` — the helpers a file needs (`helperClosure`) and their text
+  (`helperDefinitions`).
 - `format.h` — one helper for the parser: a `printf` format → literal and
   conversion pieces (§8.1). No types, no arguments.
 - `ast.h` — the data all layers speak; `diag.h` — the error type and the
@@ -385,10 +448,18 @@ The suite (`test/run_e2e.sh`, `make test`):
    without the flag. Every `test/cases/` run also checks that no lint prints
    by default.
 
-Lean is needed for steps 3 and 5 (steps are skipped, with a notice, if
-`lean` is missing). Last full run **with Lean 4.35.0**: 2026-10-23, after the
-loops slice — all passing (**106/106**: the e2e suite, plus
-`run_e2e_hard.sh`; the earlier I/O cases were re-verified by the same run).
+7. a case that has `<name>.expected.out` is also **run**: the translation goes
+   through `lean --run` with `<name>.stdin` and `<name>.args`, and its stdout,
+   stderr and exit code must equal `<name>.expected.{out,err,code}`. Those
+   files are written by the **C program itself** (`test/make_golden.sh NAME`
+   compiles it with gcc), so the translation is checked against real C, not
+   against our reading of it. Files the program creates land in a scratch
+   directory.
+
+Lean is needed for steps 3, 5 and 7 (skipped, with a notice, if `lean` is
+missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
+(input and files) with the loops slice — all passing (**143/143**, plus
+`run_e2e_hard.sh`).
 
 ## Main-spec decisions honored here
 
@@ -418,6 +489,9 @@ loops slice — all passing (**106/106**: the e2e suite, plus
   `-7/2 = -3`, `-7%2 = -1`; Lean's `/` and `%` on `Int` give `-4` and `1`.
   clean keeps Lean's; `--lint=c-semantics` says where (W014). On `intN_t`
   Lean truncates like C, on `Nat` and `uintN_t` there is no difference.
+- **Reading is by whole words** (slice 9): see **Input and files** and lint
+  W015. `fopen` failure is an error, not `NULL` (W016). Both are D4 choices
+  (C syntax, Lean semantics), listed in open-decisions.md for you to confirm.
 - **`main` returns `UInt32`**, so `return -1;` from `int main` is refused
   (a negative literal for an unsigned type); write `return 255;`.
 - **File-scope `printf` with holes is `IO.println`** even without a `\n`,
@@ -478,10 +552,15 @@ loops slice — all passing (**106/106**: the e2e suite, plus
 
 ## Next slices (suggested, one e2e case each)
 
-1. Input (`scanf`, `getchar`, `fgets(stdin)`, §8.1 🟡) and `exit(n)`, then
-   file I/O (`IO.FS`) and `main(argc, argv)`. `sprintf` → `s!` fits the same
-   format cutter.
-2. Structs, enums, typedefs (§4.5): they need file-scope declarations in the
+1. ~~Range-`for` (§6.1), `while`, `break`/`continue`~~ — **done** (loops slice).
+2. ~~Input, files, `exit`, `main(argc, argv)`, `sprintf`~~ — **done** in
+   slice 9; loops now make read-until-EOF programs work (case `input_loops`).
+   What it needs next: assignment inside a condition, so `while ((c =
+   getchar()) != EOF)` can be written as in C (today: E103, write the read out
+   before the loop and at its end); `atoi`/`strtol` (§12.2); an uninitialised
+   scalar local (`int n; scanf("%d", &n);`), which main-spec W004 plans as
+   zero-initialisation.
+3. Structs, enums, typedefs (§4.5): they need file-scope declarations in the
    AST, which is the next structural step. Also unlocks `switch` on enums.
 3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
    give E301 its fix — and the `<string.h>` helpers (§12.3).

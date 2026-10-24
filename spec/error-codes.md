@@ -2,7 +2,7 @@
 
 Extracted from main-spec §13.2. The severity, trigger and fix hint stay
 normative here; the **Implemented?** column is fact gathered from `src/`
-(state: slices 0–9, 2026-10-20). Update that column whenever a slice lands —
+(state: slices 0–9, 2026-10-24). Update that column whenever a slice lands —
 it is the at-a-glance view of what is left to build.
 
 Messages render exactly as main-spec §13.1 prescribes (implemented in
@@ -15,7 +15,7 @@ Messages render exactly as main-spec §13.1 prescribes (implemented in
 ```
 
 Errors (E) and hints (H) are always shown. Lints (W) are off by default and
-come with `--lint=c-semantics` (W001–W011 and W014, and W006); W012/W013 come with the
+come with `--lint=c-semantics` (W001–W011, W014 and W006, plus the provisional W015, W016); W012/W013 come with the
 features that trigger them. Each lint is reported once per kind per file: the
 first place, plus a count of the others. A lint never changes the translation
 or the exit code (decision D18; `src/lint.cpp`). Not built because their
@@ -89,6 +89,8 @@ Status legend: ✅ emitted today (file that throws it) · ⚠️ partial ·
 | W012 | warning       | verification domain > 64 bits                                                                        | split                                                                      | ❌ no verification constructs yet                                                                    |
 | W013 | warning       | `sorry` emitted by `--prove=none`                                                                    | —                                                                          | ❌ no `--prove` flag exists                                                                           |
 | W014 | lint          | `/` or `%` on `Int` rounds differently from C when an operand is negative (Euclidean vs truncating) — added with D18 | non-negative operands, or `unsigned`; C's truncating division is not emitted | ✅ lint.cpp |
+| W015 | lint (provisional) | `scanf`/`fscanf` read whole whitespace-separated words and consume the whitespace after them; C stops at the first unusable character and leaves the rest | one value per word; read lines with `fgets` | ✅ lint.cpp (slice 9; awaiting the human's confirmation, open-decisions.md) |
+| W016 | lint (provisional) | `fopen` that fails stops the program; C returns `NULL` | check the file exists first | ✅ lint.cpp (slice 9; awaiting the human's confirmation) |
 | H001 | hint          | `bool a[N]`                                                                                          | `bv(N) a;`                                                                 | ✅ check.cpp `declStmt`; silenced by `#pragma lean allow_bool_array` |
 | H002 | hint          | loop is not full-domain                                                                              | `VERIFY_FORALL`                                                            | ❌ no verification loops yet                                                                          |
 | H003 | hint          | `unsigned` where exact width intended                                                                 | `uintN_t`                                                                  | ❌ no hint pass (fixed-width types are translated) |

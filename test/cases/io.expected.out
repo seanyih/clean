@@ -1,0 +1,24 @@
+n = 2
+no newlinetext and z
+a line
+!to stdout
+big: 4
+n = 3
+no newlinetext and z
+a line
+!to stdout
+big: 6
+n = 0
+no newlinetext and z
+a line
+!to stdout
+small
+n = 10
+no newlinetext and z
+a line
+!to stdout
+big: 20
+r=40
+filled
+9
+3 2 1 0 
