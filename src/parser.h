@@ -16,7 +16,7 @@
 //   lvalue    :=  IDENT ( '[' expr ']' | '.' IDENT )*   (the target of an assignment)
 //   prototype :=  type IDENT '(' params ')' ';'
 //   function  :=  attr* type IDENT '(' params ')' block
-//   attr      :=  '[[' 'lean' '::' 'partial' ']]'
+//   attr      :=  '[[' 'lean' '::' ('partial' | 'inline') ']]'   then  ('static' | 'inline')*
 //   type      :=  one or more C type words, resolved by types.h (main-spec §4.1),
 //                 or  'bv' '(' (INTLIT | #define'd integer) ')'
 //   params    :=  'void' | ε | type IDENT ( ',' type IDENT )*

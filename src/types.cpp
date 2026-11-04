@@ -29,7 +29,7 @@ const std::set<std::string> kSupported = {
 // yet: a pointed refusal beats "expected a declaration".
 const std::set<std::string> kRefused = {
     "union", "static",
-    "inline", "volatile", "register", "_Atomic",
+    "volatile", "register", "_Atomic",
     "__int128", "int128_t", "uint128_t", "_Float16",
 };
 

@@ -33,6 +33,9 @@ A C file goes in, a Lean file comes out, Lean type-checks it.
 | `int f(void)` / `int f()`                | `def f : Int := …`                         |
 | `void f(…) { … }`                        | `def f … : Unit := …`                      |
 | `[[lean::partial]] int f(…) { … }`       | `partial def f …`                          |
+| `static int f(…)`, `static const int N`  | `private def …` (main-spec §4.7)           |
+| `inline int f(…)`, `[[lean::inline]]`    | `@[inline] def f …`                        |
+| `#pragma lean namespace Foo.Bar`         | the file in `namespace Foo.Bar … end Foo.Bar` (§3.2) |
 | functions in any order                   | sorted, callees first (see below)          |
 | `//` comments, anywhere C allows         | `--` lines (see **Comments** below)        |
 | `/* */` comments, anywhere C allows      | `/- -/`, multi-line kept (see **Comments**) |
@@ -445,7 +448,7 @@ cannot (see `cases-lean-rejects`).
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
 `goto` and labels (**E102** — permanent, main-spec §6),
-unions, compound literals (`(struct P){1, 2}`), `static`/`inline`, the §5.4 bit-vector helpers
+unions, compound literals (`(struct P){1, 2}`), the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**

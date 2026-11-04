@@ -1429,6 +1429,11 @@ struct Parser {
             failCode("E102", file, peek().loc, "label `" + w + "` is not translated",
                      "labels exist only for `goto`, which main-spec §6 keeps ⛔.",
                      "drop the label; restructure with a loop, or an `if`/`else` chain.");
+        if (w == "static")
+            failCode("E106", file, peek().loc, "a `static` local variable",
+                     "it keeps its value between calls, which a pure Lean function cannot; `StateM`/`IO.Ref` "
+                     "are 🟡 (main-spec §7.3).",
+                     "pass the state in and out as a parameter.");
         if (atTypeWord()) parseCType();  // a type clean does not translate: refused with the reason
         if (peek2().kind == Token::Kind::Punct && peek2().text == "(") {  // a library statement
             switch (classifyLibName(w)) {
@@ -1583,7 +1588,8 @@ struct Parser {
     }
 
     // `[[lean::partial]]` (main-spec §3.1). Returns true for `partial`.
-    bool parseAttribute() {
+    // Returns the attribute's name: "partial" or "inline".
+    std::string parseAttribute() {
         Loc at = peek().loc;
         ++i;
         ++i;  // `[[`
@@ -1596,10 +1602,10 @@ struct Parser {
         Token name = expectIdent("an attribute name");
         expectPunct("]", "to close the attribute");
         expectPunct("]", "to close the attribute");
-        if (name.text == "partial") return true;
-        if (name.text == "inline" || name.text == "nosynth" || name.text == "name")
+        if (name.text == "partial" || name.text == "inline") return name.text;
+        if (name.text == "nosynth" || name.text == "name")
             fail(file, at, "attribute `lean::" + name.text + "` is not translated yet",
-                 "only `lean::partial` exists in this build.", "remove it for now.");
+                 "only `lean::partial` and `lean::inline` exist in this build.", "remove it for now.");
         fail(file, name.loc, "unknown attribute `lean::" + name.text + "`",
              "main-spec §3.1 lists partial, inline, nosynth, name.", "fix the spelling.");
     }
@@ -1758,19 +1764,29 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             p.newDecls.clear();
             continue;
         }
-        bool isPartial = false;
+        bool isPartial = false, isInline = false, isStatic = false;
         Loc attrLoc = p.peek().loc;
         bool hasAttr = false;
         while (p.isPunct("[") && p.peek2().kind == Token::Kind::Punct && p.peek2().text == "[") {
-            isPartial = p.parseAttribute() || isPartial;
+            const std::string a = p.parseAttribute();
+            isPartial = isPartial || a == "partial";
+            isInline = isInline || a == "inline";
             hasAttr = true;
             for (Comment& c : p.takeComments(p.i, true)) pending.push_back(std::move(c));
+        }
+        Loc storageAt = p.peek().loc;
+        while (p.isIdent("static") || p.isIdent("inline")) {  // main-spec §4.7, in either order
+            (p.isIdent("static") ? isStatic : isInline) = true;
+            ++p.i;
         }
         if (p.peek().kind != Token::Kind::Ident)
             p.failHere("expected a declaration, found " + describe(p.peek()), kSliceWhy,
                        "files contain functions; see spec/impl-spec.md.");
         int defLine = p.peek().loc.line;
         const bool isExtern = p.isIdent("extern");  // main-spec §7.2.1: Lean already defines it
+        if (isExtern && (isStatic || isInline))
+            fail(fileName, storageAt, "`static`/`inline` on an `extern` declaration",
+                 "nothing is emitted for an `extern`.", "remove the qualifier.");
         if (isExtern) {
             if (hasAttr)
                 fail(fileName, attrLoc, "an attribute on an `extern` declaration",
@@ -1812,9 +1828,9 @@ TranslationUnit parse(const std::vector<Token>& tokens,
                 unit.functions.push_back(std::move(g));
                 continue;
             }
-            if (hasAttr)
-                fail(fileName, attrLoc, "an attribute on the global `" + name.text + "`",
-                     "the `lean::` attributes apply to functions.", "remove it.");
+            if (hasAttr || isInline)
+                fail(fileName, attrLoc, "an attribute or `inline` on the global `" + name.text + "`",
+                     "they apply to functions.", "remove it.");
             if (!isConst)
                 failCode("E106", fileName, name.loc, "`" + name.text + "` is a mutable global variable",
                          "Lean definitions are constants; a global that functions change would need "
@@ -1835,6 +1851,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             pending.clear();
             for (Comment& c : p.takeComments(p.i, false)) g.comments.push_back(std::move(c));
             g.body.push_back(std::move(decl));
+            g.isPrivate = isStatic;  // `static const int N = …;` → `private def`
             unit.functions.push_back(std::move(g));
             continue;
         }
@@ -1869,7 +1886,12 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             continue;
         }
         Function f = p.parseFunction(name.text, defLine, std::move(params), std::move(pending));
+        if (isStatic && f.name == "main")
+            fail(fileName, storageAt, "`static main`", "Lean runs a `main` it can see; a `private` one is not.",
+                 "drop `static`.");
         f.isPartial = isPartial;
+        f.isPrivate = isStatic;
+        f.isInline = isInline;
         f.retType = retType;
         unit.functions.push_back(std::move(f));
         pending.clear();

@@ -62,6 +62,7 @@ struct Lexer {
     // A `#…` line, including `\`-continuations. `#define NAME …` records NAME;
     // `#define NAME <integer literal>` also records the value (for `bv(NAME)`).
     void directive(LexResult& res) {
+        const Loc at{line, col};
         step();  // '#'
         while (cur() == ' ' || cur() == '\t') step();
         std::string word;
@@ -90,6 +91,21 @@ struct Lexer {
                 size_t e = k;
                 while (e < rest.size() && isIdentChar(rest[e])) ++e;
                 if (e > k) res.pragmas.insert(rest.substr(k, e - k));
+                if (rest.substr(k, e - k) == "namespace") {  // `#pragma lean namespace Foo.Bar` (main-spec §3.2)
+                    k = e;
+                    while (k < rest.size() && (rest[k] == ' ' || rest[k] == '\t')) ++k;
+                    e = k;
+                    while (e < rest.size() && (isIdentChar(rest[e]) || rest[e] == '.')) ++e;
+                    const std::string ns = rest.substr(k, e - k);
+                    if (ns.empty() || ns.front() == '.' || ns.back() == '.' || ns.find("..") != std::string::npos)
+                        throw DiagError("E000", file, at, "`#pragma lean namespace` needs a name",
+                                        "the whole file goes into `namespace NAME … end NAME`.",
+                                        "write `#pragma lean namespace Foo` (dots allowed: `Foo.Bar`).");
+                    if (!res.namespaceName.empty() && res.namespaceName != ns)
+                        throw DiagError("E000", file, at, "a second `#pragma lean namespace`",
+                                        "one file goes into one namespace.", "keep one of them.");
+                    res.namespaceName = ns;
+                }
             }
             return;
         }

@@ -42,6 +42,7 @@ struct LexResult {
     // anywhere else is still refused.
     std::map<std::string, std::string> definedValues;
     std::set<std::string> pragmas;  // `#pragma lean allow_bool_array` → "allow_bool_array"
+    std::string namespaceName;      // `#pragma lean namespace Foo` → "Foo" (main-spec §3.2)
 };
 
 LexResult lex(const std::string& source, const std::string& fileName);

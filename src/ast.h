@@ -225,6 +225,8 @@ struct Function {
     std::vector<Comment> bodyTrailing;  // comments before the body's closing `}`
     int defLine = 0;                    // line of the leading `int` (D9: `-- c: file:LINE`)
     bool isPartial = false;             // `[[lean::partial]]` → `partial def`
+    bool isPrivate = false;             // `static` → `private def` (main-spec §4.7)
+    bool isInline = false;              // `inline` / `[[lean::inline]]` → `@[inline]` (main-spec §4.7)
     std::vector<std::string> mutParams; // parameters the body assigns (check.cpp) → `let mut a := a`
     int writerParam = -1;               // `void` function that writes exactly one array parameter
                                        // (OD11 c, check.cpp): that parameter's index; -1 = none.
@@ -277,6 +279,7 @@ struct TranslationUnit {
     std::vector<TypeDecl> typeDecls;    // typedefs, enums, structs, source order (main-spec §4.5)
     std::vector<Function> functions;    // parser: source order; after sortDefinitions(): callees first
     std::set<std::string> pragmas;      // `#pragma lean NAME` words (set by main from the lexer)
+    std::string namespaceName;          // `#pragma lean namespace Foo`: the file is wrapped in it (main-spec §3.2)
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build
     std::vector<Comment> trailingComments;  // comments after the last definition
     std::vector<Stmt> scripts;          // file-scope `printf` etc. (§8.2), source order; emitted as `#eval` after the functions

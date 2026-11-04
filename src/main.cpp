@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
         LexResult lexed = lex(source, baseName(in));
         TranslationUnit unit = parse(lexed.tokens, lexed.definedNames, lexed.definedValues, baseName(in));
         unit.pragmas = lexed.pragmas;
+        unit.namespaceName = lexed.namespaceName;
         check(unit);
         if (lintCSemantics) lint(unit);  // before sorting: "first place" means first in the C file
         sortDefinitions(unit);
