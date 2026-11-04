@@ -53,4 +53,20 @@ Taken while building slice 9 (input and files, 2026-10-23); they stand unless yo
 | `exit(n)` status | Taken mod 256 as a `UInt8`, like C. | src/check.cpp |
 | Helper `def`s in the output | `hexOf` and the new input helpers are printed at the top of each file that needs them; their names are reserved (a user function of that name is refused). Lean `String.asString` is deprecated in 4.35, so `hexOf` now uses `String.ofList`. | src/prelude.cpp |
 
+Taken while building the 2026-11 feature commits (`?:` through the catalogue codes); they stand unless you veto:
+
+| What | Decision | Where |
+| ---- | -------- | ----- |
+| Limits are literals | `INT32_MAX` etc. become their number (`2147483647`), not main-spec §12.2's `Int32.maxValue.toInt`: the same value, and as a literal it adapts to an `int32_t`/`uint8_t` context with no conversion (D19). | impl-spec.md "The pure C library", src/builtins.cpp |
+| `strcmp` | A generated helper returning -1 / 0 / 1 (C's `int`), not main-spec §12.3's `compare` (an `Ordering`, which `strcmp(a, b) == 0` cannot use). | src/prelude.cpp |
+| C truth values from the library | `isdigit`, `isnan`, … return a `bool`, so `int r = isdigit(c);` is refused like any `bool` → `int`. | impl-spec.md "The pure C library" |
+| Library names vs user functions | A file that defines `min`, `sqrt`, … gets its own; only the bit-vector helpers' names (`bv_*`) are reserved. | src/check.cpp `stdCall` |
+| Exhaustive enum `switch` | A `switch` with a case for every enumerator drops the statements after it (main-spec §14.3 drops the safety-net `return 0;`), silently. | src/check.cpp `stmts` |
+| `VERIFY_FORALL` names | A C label names the theorem; else `f_eq_g` for `f(…) == g(…)`, else `verify_LINE`. Main-spec §9.4's `<common-prefix>_equiv` rule and §14.4's `sboxHW_eq_spec` example disagree with each other; this picks neither. | impl-spec.md "Theorems" |
+| `VERIFY_FORALL` proof script | `intro …; try simp only [every definition reached, Id.run, pure, bind]; all_goals bv_decide`, with `linter.unusedSimpArgs` off for the theorem. | src/emitter.cpp `emitVerify` |
+| `LEAN_DECL` placement | Above every function → after the types, before the functions; below one → at the end of the file. | impl-spec.md "Raw Lean" |
+| Reserved names (D8) | The Lean 4.35 tokens `at`, `end`, `where`, `instance`, `class`, `calc`, … (probed one by one) join the keyword list. `at` was a field name in practice. | src/parser.cpp `kLeanKeywords` |
+| One variable per declaration | `int a, b;` is refused with a fix (each declarator would be its own `let`); struct fields do allow `double w, h;`. | src/parser.cpp |
+| Test hooks | `NAME.flags` (extra flags) and `NAME.before.lean` (the Lean side of `extern`s) in test/cases. | test/run_e2e.sh |
+
 Suggested next slices are a plan, not decisions; they live in impl-spec.md.
