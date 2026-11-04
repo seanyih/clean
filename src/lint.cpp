@@ -201,7 +201,7 @@ void lint(TranslationUnit& unit) {
     Linter L{unit.fileName, {}};
     for (const Function& f : unit.functions) {
         const Loc at{f.defLine, 1};
-        L.type(f.retType, at, cName(f.retType) + " " + f.name + "(…)");
+        if (!f.isGlobal) L.type(f.retType, at, cName(f.retType) + " " + f.name + "(…)");  // a global: its Decl
         for (const auto& p : f.params) L.type(p.first, at, cName(p.first) + " " + p.second);
         L.stmts(f.body);
         forEachExpr(f.body, [&](const Expr& e) { L.expr(e); });

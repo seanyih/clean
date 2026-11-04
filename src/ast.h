@@ -233,6 +233,8 @@ struct Function {
                                        // `main (args : List String)` plus two lets (check.cpp prepareMain)
     bool isIO = false;                  // prints, or calls something that does; `main` always (check.cpp)
                                        // → `: IO T := do` (main-spec §3.3)
+    bool isGlobal = false;              // a file-scope `const T name = …;` (main-spec §7.3): no parameters, the
+                                       // body is that one Decl, emitted `def name : T := …`
     bool recursive = false;             // reaches itself through calls (toposort.cpp)
     int mutualGroup = -1;               // ≥ 0: member of a `mutual … end` block with this id (toposort.cpp)
 };

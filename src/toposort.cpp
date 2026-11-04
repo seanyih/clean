@@ -17,7 +17,7 @@
 namespace {
 
 void collectCalls(const Expr& e, std::vector<std::string>& out) {
-    if (e.kind == Expr::Kind::Call) out.push_back(e.text);
+    if (e.kind == Expr::Kind::Call || e.kind == Expr::Kind::Ident) out.push_back(e.text);  // a call, or a global constant
     for (const Expr& k : e.kids) collectCalls(k, out);
 }
 

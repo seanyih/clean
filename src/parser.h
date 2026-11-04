@@ -5,7 +5,8 @@
 // TranslationUnit (syntax only: whether names exist etc. is check.h). The format of a
 // printf is cut up by format.h. Grammar:
 //
-//   file      :=  ( comment | ';' | typedef | prototype | function | print )*  EOF
+//   file      :=  ( comment | ';' | typedef | enumdecl | structdecl | global | prototype | function | print )*  EOF
+//   global    :=  a local declaration whose type words include `const` (main-spec §7.3; else E106)
 //   typedef   :=  'typedef' type '*'* IDENT ';'          (main-spec §4.5)
 //   enumdecl  :=  'enum' IDENT? '{' IDENT ('=' INTLIT)? (',' IDENT ('=' INTLIT)?)* ','? '}' ';'
 //                 (also as the `type` of a typedef; `enum IDENT` names a defined one)

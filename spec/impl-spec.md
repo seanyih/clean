@@ -151,6 +151,16 @@ stand for their values. Refused: an `enum` defined inside a function, used
 before its definition, defined twice, empty, or with a global variable after
 it (E106); two enumerators of one name; an enumerator named like a function.
 
+**Global constants** (main-spec §7.3). A file-scope variable whose type
+words include `const` is a `def`: `const int N = 8;` → `def N : Int := 8`,
+`const uint8_t T[4] = {…};` → `def T : Array UInt8 := #[…]`, likewise strings
+and structs. The initialiser is checked like a local's and may use the
+constants and pure functions of the file; toposort.cpp orders every `def`
+after what it reads. Functions read them by name (a local may shadow one).
+Refused: a global without `const` (**E106** — Lean definitions never change;
+`StateM`/`IO.Ref` are 🟡), a `const` without a value, assigning to a
+constant, calling one, an initialiser that does I/O.
+
 **Mixed types (D19).** When two operands differ, the conversion of main-spec
 §5.3 is inserted for the one of lower rank, so the output always shows it:
 `Nat < Int < intN_t/uintN_t < bv(N) < Float32 < Float`. Two fixed widths: the

@@ -1767,10 +1767,41 @@ TranslationUnit parse(const std::vector<Token>& tokens,
                        "files contain functions; see spec/impl-spec.md.");
         int defLine = p.peek().loc.line;
         Loc retAt = p.peek().loc;
+        const size_t typeStart = p.i;
         Type retType = p.parseCType();
-        retType = p.declare(retType, p.parseStars(), 0, retAt, false);
+        const int stars = p.parseStars();
         Token name = p.expectName("a function name");
         p.checkName(name);
+        if (!p.isPunct("(")) {  // a file-scope variable: a `const` one is a `def` (main-spec §7.3)
+            bool isConst = false;
+            for (size_t k = typeStart; k < p.i; ++k) isConst = isConst || p.toks[k].text == "const";
+            if (hasAttr)
+                fail(fileName, attrLoc, "an attribute on the global `" + name.text + "`",
+                     "the `lean::` attributes apply to functions.", "remove it.");
+            if (!isConst)
+                failCode("E106", fileName, name.loc, "`" + name.text + "` is a mutable global variable",
+                         "Lean definitions are constants; a global that functions change would need "
+                         "`StateM` or `IO.Ref`, which main-spec §7.3 keeps 🟡.",
+                         "make it `const` if it never changes, or pass the state as a parameter.");
+            p.i = typeStart;
+            Stmt decl = p.parseDeclTail();  // `const T name = …;` / `const T a[N] = {…};`
+            if (decl.noInit)
+                fail(fileName, name.loc, "the constant `" + name.text + "` has no value",
+                     "a `const` that is never set is always zero; that is almost always a mistake.",
+                     "give it its value: `const " + cName(decl.type) + " " + name.text + " = …;`.");
+            Function g;
+            g.name = name.text;
+            g.defLine = defLine;
+            g.isGlobal = true;
+            g.retType = decl.type;
+            g.comments = std::move(pending);
+            pending.clear();
+            for (Comment& c : p.takeComments(p.i, false)) g.comments.push_back(std::move(c));
+            g.body.push_back(std::move(decl));
+            unit.functions.push_back(std::move(g));
+            continue;
+        }
+        retType = p.declare(retType, stars, 0, retAt, false);
         p.expectPunct("(", "to open the parameter list of `" + name.text + "`");
         auto params = p.parseParams(name.text == "main");
         p.expectPunct(")", "to close the parameter list of `" + name.text + "`");

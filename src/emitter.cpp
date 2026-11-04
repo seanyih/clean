@@ -855,6 +855,14 @@ void emitStmts(const std::vector<Stmt>& list, int level, const std::string& wret
 void emitFunction(const Function& f, const std::string& fileName, std::string& out) {
     out += "-- c: " + fileName + ":" + std::to_string(f.defLine) + "\n";
     emitComments(f.comments, "", out);
+    if (f.isGlobal) {  // `const T name = e;` → `def name : T := e` (main-spec §7.3)
+        const Stmt& d = f.body[0];
+        out += "def " + f.name + " : " + leanName(d.type) + " := ";
+        if (d.type.kind == Type::Kind::Array) out += arrayInit(d);
+        else emitExpr(d.expr, out);
+        out += "\n";
+        return;
+    }
     const bool writer = f.writerParam >= 0;  // OD11 (c): the written array parameter comes back
     const std::string wret = writer ? f.params[(size_t)f.writerParam].second : "";
     // A writer's one-statement body can only be `return;`, which needs the `do`

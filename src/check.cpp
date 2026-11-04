@@ -479,7 +479,8 @@ void prepareMain(TranslationUnit& unit) {
 struct Sig {
     std::vector<Type> params;
     Type ret;
-    bool io = false;  // the function does I/O (findIO)
+    bool io = false;      // the function does I/O (findIO)
+    bool global = false;  // a `const` global (main-spec §7.3), not a function
 };
 
 // An enumerator (main-spec §4.5): its enum type and C value.
@@ -493,6 +494,7 @@ struct EnumConst {
 struct Var {
     Stmt* decl;
     Type type;
+    bool global = false;  // a `const` global: read-only
 };
 
 struct Checker {
@@ -746,6 +748,9 @@ struct Checker {
                      "`" + e.text + "` is translated as an `IO` action, which has no number to give back.",
                      "call it as a statement, on its own line.");
             auto it = sigs.find(e.text);
+            if (it != sigs.end() && it->second.global)
+                fail(file, e.loc, "the constant `" + e.text + "` is called like a function",
+                     "it is a value, not a function.", "drop the `(…)`.");
             if (it == sigs.end())
                 fail(file, e.loc, "`" + e.text + "` is called but not defined in this file",
                      "calls are resolved inside the file; `extern` declarations come later.",
@@ -906,6 +911,10 @@ struct Checker {
                  "clean rejects unknown names instead of emitting Lean that fails later (D5).",
                  "declare it first: `int " + name + " = …;`.");
         }
+        if (v.global)
+            fail(file, loc, "assignment to the constant `" + name + "`",
+                 "a `const` global is a Lean `def`, which never changes (C rejects it too).",
+                 "copy it into a local and change that.");
         if (v.decl) {
             v.decl->mut = true;
         } else {
@@ -1567,6 +1576,21 @@ struct Checker {
     }
 
     void run() {
+        scopes.emplace_back();  // the outermost scope: the file's `const` globals (main-spec §7.3)
+        bare.push_back(false);
+        for (const auto& g : sigs)
+            if (g.second.global && g.first != fn.name) scopes[0][g.first] = Var{nullptr, g.second.ret, true};
+        if (fn.isGlobal) {  // `const T name = e;`: the initialiser is checked like a local's
+            Stmt& decl = fn.body[0];
+            declStmt(decl);
+            bool io = false;
+            forEachExpr(fn.body, [&](const Expr& e) { io = io || callsIO(e); });
+            if (io)
+                fail(file, decl.loc, "the constant `" + fn.name + "` is computed with I/O",
+                     "a Lean `def` is a pure value; it cannot read or print.",
+                     "compute it inside `main`, or call a pure function.");
+            return;
+        }
         scopes.emplace_back();
         bare.push_back(false);
         std::set<std::string> seen;
@@ -1574,7 +1598,7 @@ struct Checker {
             if (!seen.insert(p.second).second)
                 fail(file, Loc{fn.defLine, 1}, "parameter `" + p.second + "` is declared twice",
                      "C rejects it too.", "rename one of them.");
-            scopes[0][p.second] = Var{nullptr, p.first};
+            scopes[1][p.second] = Var{nullptr, p.first};
         }
         stmts(fn.body);
         if (fn.retType.kind != Type::Kind::Unit && !returnsOnAllPaths(fn.body))
@@ -1633,6 +1657,7 @@ void check(TranslationUnit& unit) {
         Sig sig;
         sig.ret = f.retType;
         sig.io = f.isIO;
+        sig.global = f.isGlobal;
         for (const auto& p : f.params) sig.params.push_back(p.first);
         sigs[f.name] = sig;
     }
