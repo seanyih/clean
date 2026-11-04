@@ -50,7 +50,7 @@ bool stmtReturns(const Stmt& s) {
     case Stmt::Kind::Block:
         return returnsOnAllPaths(s.body);
     case Stmt::Kind::Switch: {
-        bool hasDefault = false;
+        bool hasDefault = s.exhaustive;  // every enumerator has a case: Lean's `match` is total
         for (const Case& c : s.cases) {
             if (c.isDefault) hasDefault = true;
             if (c.endsInBreak || !returnsOnAllPaths(c.body)) return false;
@@ -481,6 +481,12 @@ struct Sig {
     bool io = false;  // the function does I/O (findIO)
 };
 
+// An enumerator (main-spec §4.5): its enum type and C value.
+struct EnumConst {
+    Type type;
+    long long value = 0;
+};
+
 // A visible name: its type, and its Decl (nullptr for a parameter) so
 // assignments can mark the Decl `mut`.
 struct Var {
@@ -496,6 +502,7 @@ struct Checker {
     std::vector<DiagError>& notes;           // hints (H…) the unit carries to main
     const std::map<std::string, int>& writers;  // name → written array parameter's index (OD11 c)
     std::set<std::string>& helpers;             // the generated helpers this file needs (prelude.h)
+    const std::map<std::string, EnumConst>& enumConsts;  // every enumerator of the file (main-spec §4.5)
     // scopes[0] holds the parameters and the function's top-level locals.
     std::vector<std::map<std::string, Var>> scopes;
     std::vector<bool> bare;  // per scope: opened by a bare `{ }` block (flattened in Lean)
@@ -596,6 +603,8 @@ struct Checker {
         case Expr::Kind::Ident: {
             Var v;
             if (lookup(e.text, v)) return v.type;
+            auto en = enumConsts.find(e.text);  // `RED`: the constructor, in scope through `open Color`
+            if (en != enumConsts.end()) return en->second.type;
             if (isStandardStream(e.text)) {  // `(← IO.getStdin)` and friends: reading the stream is an action
                 e.io = true;
                 return Type::of(Type::Kind::File);
@@ -1054,10 +1063,50 @@ struct Checker {
 
     void switchStmt(Stmt& s) {
         Type st = value(s.expr);
-        if (st.kind != Type::Kind::Int && st.kind != Type::Kind::Nat && st.kind != Type::Kind::Literal)
+        const bool onEnum = st.kind == Type::Kind::Enum;
+        if (!onEnum && st.kind != Type::Kind::Int && st.kind != Type::Kind::Nat && st.kind != Type::Kind::Literal)
             fail(file, s.expr.loc, "`switch` on a `" + cName(st) + "` is not translated yet",
-                 "only `int`/`unsigned` scrutinees are; match patterns on the other types are unverified.",
+                 "only `int`/`unsigned` and `enum` scrutinees are; match patterns on the other types are unverified.",
                  "use an `if`/`else if` chain.");
+        // labels: on an enum, its enumerators (Lean constructor patterns); on an integer, numbers —
+        // an enumerator there stands for its value, as in C
+        std::set<std::string> seenNames;
+        for (Case& c : s.cases)
+            for (Expr& lab : c.labels) {
+                if (lab.kind != Expr::Kind::Ident) {
+                    if (onEnum)
+                        fail(file, lab.loc, "a number labels a case of a `switch` on `" + cName(st) + "`",
+                             "the scrutinee is a Lean `inductive`; its cases are the enumerators.",
+                             "write the enumerator.");
+                    continue;
+                }
+                auto en = enumConsts.find(lab.text);
+                if (en == enumConsts.end())
+                    fail(file, lab.loc, "`case " + lab.text + ":` — `" + lab.text + "` is not an enumerator",
+                         "a label is an integer literal or an enumerator; macros are not expanded.",
+                         "write the number.");
+                if (onEnum) {
+                    if (!(en->second.type == st))
+                        fail(file, lab.loc, "`" + lab.text + "` belongs to `" + cName(en->second.type) +
+                                 "`, the switch is on `" + cName(st) + "`",
+                             "a Lean `match` pattern must have the scrutinee's type.", "use an enumerator of `" + cName(st) + "`.");
+                    if (!seenNames.insert(lab.text).second)
+                        fail(file, lab.loc, "duplicate `case` value", "C rejects it too.",
+                             "remove or change one of the labels.");
+                    lab.type = st;
+                } else {
+                    const Loc at = lab.loc;
+                    lab = Expr();
+                    lab.kind = Expr::Kind::IntLit;
+                    lab.text = std::to_string(en->second.value);
+                    lab.loc = at;
+                }
+            }
+        if (onEnum) {  // every enumerator has a case: the `match` is total without `| _`
+            size_t total = 0;
+            for (const auto& en : enumConsts) total += en.second.type == st;
+            s.exhaustive = seenNames.size() == total;
+        }
         std::set<long long> seen;
         bool haveDefault = false;
         for (size_t k = 0; k < s.cases.size(); ++k) {
@@ -1069,7 +1118,7 @@ struct Checker {
                 haveDefault = true;
             }
             for (const Expr& lab : c.labels)
-                if (!seen.insert(labelValue(lab)).second)
+                if (!onEnum && !seen.insert(labelValue(lab)).second)
                     fail(file, lab.loc, "duplicate `case` value",
                          "C rejects it too.", "remove or change one of the labels.");
             scoped(c.body);
@@ -1190,7 +1239,8 @@ struct Checker {
                 case Type::Kind::SInt: case Type::Kind::UInt: case Type::Kind::BitVec:
                     break;
                 case Type::Kind::Char:
-                    coerce(a, nat);  // C prints the character code
+                case Type::Kind::Enum:
+                    coerce(a, nat);  // C prints the character code / the enumerator's value
                     break;
                 default:
                     refuse(t, "`%d` and `%u` print integers; clean does not guess how to show anything else.",
@@ -1332,7 +1382,8 @@ struct Checker {
     void stmts(std::vector<Stmt>& list) {
         bool dead = false;
         bool deadByExit = false;  // what ended the block: `exit(…)`, or `return` (and the like)
-        for (Stmt& s : list) {
+        for (size_t k = 0; k < list.size(); ++k) {
+            Stmt& s = list[k];
             if (dead && deadByExit)
                 fail(file, s.loc, "unreachable code after `exit`",
                      "the program ends at `exit`, so this code can never run.",
@@ -1431,6 +1482,12 @@ struct Checker {
                 break;
             }
             if (stmtReturns(s)) {
+                if (s.kind == Stmt::Kind::Switch && s.exhaustive) {
+                    // main-spec §14.3: a `switch` with a case for every enumerator returns on its
+                    // own; C's safety-net `return 0;` after it is unreachable in Lean, so it is dropped
+                    list.erase(list.begin() + (long)k + 1, list.end());
+                    return;
+                }
                 dead = true;
                 deadByExit = s.kind == Stmt::Kind::Exit;
             }
@@ -1465,6 +1522,20 @@ void check(TranslationUnit& unit) {
                  "clean translates calls to `" + f.name + "` as the C library function (main-spec §8.1), "
                  "so a function of that name would never be called.",
                  "rename the function.");
+    std::map<std::string, EnumConst> enumConsts;  // every enumerator, by name (main-spec §4.5)
+    for (const TypeDecl& d : unit.typeDecls) {
+        if (d.kind != TypeDecl::Kind::Enum) continue;
+        for (const Enumerator& en : d.enumerators) {
+            if (enumConsts.count(en.name))
+                fail(unit.fileName, en.loc, "enumerator `" + en.name + "` is defined twice",
+                     "C rejects it too, and `open` would make the name ambiguous in Lean.", "rename one of them.");
+            enumConsts[en.name] = EnumConst{Type::named(Type::Kind::Enum, d.name), en.value};
+            for (const Function& f : unit.functions)
+                if (f.name == en.name)
+                    fail(unit.fileName, Loc{f.defLine, 1}, "`" + f.name + "` is both an enumerator and a function",
+                         "C rejects it too: they share one namespace.", "rename one of them.");
+        }
+    }
     for (const TypeDecl& d : unit.typeDecls)  // a Lean type and a Lean function cannot share a name
         for (const Function& f : unit.functions)
             if (f.name == d.name)
@@ -1489,7 +1560,7 @@ void check(TranslationUnit& unit) {
     for (const Function& f : unit.functions)
         if (f.writerParam >= 0) writers[f.name] = f.writerParam;
     for (Function& f : unit.functions)
-        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.helpers, {}, {}}.run();
+        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, {}, {}}.run();
 
     // File-scope `printf` etc. (main-spec §8.2): checked like the body of a `void` function with
     // no parameters, so names, types and arities get the same treatment.
@@ -1498,7 +1569,7 @@ void check(TranslationUnit& unit) {
         script.name = "<file scope>";
         script.retType = Type::of(Type::Kind::Unit);
         script.body = std::move(unit.scripts);
-        Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.helpers, {}, {}}.run();
+        Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, {}, {}}.run();
         unit.scripts = std::move(script.body);
     }
 

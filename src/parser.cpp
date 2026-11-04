@@ -103,12 +103,89 @@ struct Parser {
     size_t i = 0;
     size_t nextComment = 0;  // first comment not handed out yet
     std::map<std::string, Type> typedefs;  // `typedef T name;` seen so far: name → T (its `alias` = name)
+    std::map<std::string, Type> enumTags;  // `enum Tag { … }` seen so far: Tag → its type
+    bool typeBodies = false;               // file scope: `enum … { … }` may be defined here
+    std::vector<TypeDecl> newDecls;        // type declarations met while parsing one file-scope item
+
+    // An integer literal's value (`7`, `0x1F`, `0b11`).
+    static long long literalValue(const std::string& t) {
+        if (t.size() > 2 && t[0] == '0' && (t[1] == 'b' || t[1] == 'B'))
+            return (long long)std::strtoull(t.c_str() + 2, nullptr, 2);
+        return (long long)std::strtoull(t.c_str(), nullptr, 0);
+    }
+
+    // `enum Tag` (defined above), or a definition `enum [Tag] { A, B = 3, C }`
+    // at file scope (main-spec §4.5). A definition is queued in `newDecls`; an
+    // anonymous one gets its name from the `typedef` around it.
+    Type parseEnumType() {
+        Loc at = peek().loc;
+        ++i;  // `enum`
+        std::string tag;
+        Loc tagAt = peek().loc;
+        if (!isPunct("{")) {
+            Token t = expectName("the name of the `enum`");
+            checkName(t);
+            tag = t.text;
+        }
+        if (!isPunct("{")) {
+            auto it = enumTags.find(tag);
+            if (it == enumTags.end())
+                fail(file, tagAt, "`enum " + tag + "` is not defined above this point",
+                     "Lean needs the `inductive` before its first use, and clean does not guess its enumerators.",
+                     "define it first: `enum " + tag + " { … };`.");
+            return it->second;
+        }
+        if (!typeBodies)
+            fail(file, at, "an `enum` is defined inside a function or a parameter list",
+                 "Lean's `inductive` is a file-scope declaration.", "define the `enum` at file scope, above its use.");
+        if (enumTags.count(tag))
+            fail(file, tagAt, "`enum " + tag + "` is defined twice", "C rejects it too.", "rename one of them.");
+        TypeDecl d;
+        d.kind = TypeDecl::Kind::Enum;
+        d.name = tag;
+        d.line = at.line;
+        d.loc = tag.empty() ? at : tagAt;
+        ++i;  // `{`
+        long long next = 0;
+        while (!isPunct("}")) {
+            Token n = expectName("an enumerator");
+            checkName(n);
+            Enumerator en{n.text, next, n.loc};
+            if (isPunct("=")) {
+                ++i;
+                if (isPunct("-"))
+                    failHere("a negative enumerator value",
+                             "the `E.toNat` that gives an enumerator its value returns a `Nat` (main-spec §4.5).",
+                             "use non-negative values.");
+                if (peek().kind != Token::Kind::IntLit)
+                    failHere("an enumerator value must be an integer literal",
+                             "clean reads the value while translating; expressions are not evaluated.",
+                             "write the number: `" + n.text + " = 3`.");
+                en.value = literalValue(toks[i++].text);
+                d.explicitValues = true;
+            }
+            d.enumerators.push_back(en);
+            next = en.value + 1;
+            if (!isPunct(",")) break;
+            ++i;
+        }
+        expectPunct("}", "to close the `enum`");
+        if (d.enumerators.empty())
+            fail(file, at, "an `enum` with no enumerators", "C rejects it too.", "list at least one.");
+        Type t = Type::named(Type::Kind::Enum, tag);
+        if (!tag.empty()) enumTags[tag] = t;
+        newDecls.push_back(std::move(d));
+        return t;
+    }
 
     const Token& peek() const { return toks[i]; }
     const Token& peek2() const { return toks[i + 1]; }  // safe unless peek() is End
     bool atEnd() const { return peek().kind == Token::Kind::End; }
     bool isPunct(const std::string& s) const {
         return peek().kind == Token::Kind::Punct && peek().text == s;
+    }
+    bool isPunctAt(size_t j, const std::string& s) const {
+        return j < toks.size() && toks[j].kind == Token::Kind::Punct && toks[j].text == s;
     }
     bool isIdent(const std::string& s) const {
         return peek().kind == Token::Kind::Ident && peek().text == s;
@@ -159,14 +236,16 @@ struct Parser {
     // `typedef` name?
     bool isTypeToken(size_t j) const {
         return toks[j].kind == Token::Kind::Ident &&
-               (classifyTypeWord(toks[j].text) != TypeWord::NotAType || typedefs.count(toks[j].text));
+               (classifyTypeWord(toks[j].text) != TypeWord::NotAType || typedefs.count(toks[j].text) ||
+                toks[j].text == "enum");
     }
     bool atTypeWord() const { return isTypeToken(i); }
 
     // Does a declaration start here: a type clean translates, or a `typedef` name?
     bool atDeclStart() const {
         return peek().kind == Token::Kind::Ident &&
-               (classifyTypeWord(peek().text) == TypeWord::Supported || typedefs.count(peek().text));
+               (classifyTypeWord(peek().text) == TypeWord::Supported || typedefs.count(peek().text) ||
+                peek().text == "enum");
     }
     static bool isQualifier(const Token& t) {
         return t.kind == Token::Kind::Ident && (t.text == "const" || t.text == "restrict");
@@ -262,6 +341,8 @@ struct Parser {
             while (isQualifier(peek())) ++i;
             return typedefs.at(toks[j].text);
         }
+        if (isQualifier(peek()) && toks[j].kind == Token::Kind::Ident && toks[j].text == "enum") i = j;
+        if (isIdent("enum")) return parseEnumType();
         if (isBitVecWord(peek().text)) return parseBitVec();
         std::vector<std::string> words;
         while (atTypeWord() && !isBitVecWord(peek().text)) words.push_back(toks[i++].text);
@@ -665,12 +746,12 @@ struct Parser {
     // `case` labels are integer literals (enum constants arrive with enums).
     Expr parseCaseLabel() {
         Expr e = parseUnary();
-        bool lit = e.kind == Expr::Kind::IntLit ||
+        bool lit = e.kind == Expr::Kind::IntLit || e.kind == Expr::Kind::Ident ||  // an enumerator (check.cpp)
                    (e.kind == Expr::Kind::UnaryNeg && e.kids[0].kind == Expr::Kind::IntLit);
         if (!lit)
-            fail(file, e.loc, "a `case` label must be an integer literal",
-                 "named constants and expressions in labels arrive with enums and macros.",
-                 "write the number (`case 3:` or `case -1:`).");
+            fail(file, e.loc, "a `case` label must be an integer literal or an enumerator",
+                 "expressions in labels are not evaluated, and macros are not expanded.",
+                 "write the number (`case 3:` or `case -1:`), or the enumerator.");
         return e;
     }
 
@@ -1364,14 +1445,16 @@ struct Parser {
     // `typedef T name;` at file scope (main-spec §4.5) → `abbrev name := T`. The
     // name becomes a type word for the rest of the file; values of the type
     // keep its name (`Type::alias`), so the output reads `byte`, not `BitVec 8`.
-    TypeDecl parseTypedef(std::vector<Comment> comments) {
+    void parseTypedef(std::vector<Comment> comments) {
         TypeDecl d;
         d.kind = TypeDecl::Kind::Alias;
         d.line = peek().loc.line;
         d.comments = std::move(comments);
         ++i;  // `typedef`
         Loc at = peek().loc;
+        typeBodies = true;  // `typedef enum { … } Color;`
         Type base = parseCType();
+        typeBodies = false;
         int stars = parseStars();
         Token name = expectName("the name the `typedef` introduces");
         checkName(name);
@@ -1389,13 +1472,44 @@ struct Parser {
         if (typedefs.count(name.text))
             fail(file, name.loc, "`" + name.text + "` is defined twice by `typedef`",
                  "Lean allows only one definition per name.", "rename one of them.");
+        for (Comment& c : takeComments(i, false)) d.comments.push_back(std::move(c));
+        if (t.kind == Type::Kind::Enum && t.name.empty() && stars == 0) {
+            // `typedef enum { … } Color;`: the anonymous type takes the name, no `abbrev` needed
+            TypeDecl& def = newDecls.back();
+            def.name = name.text;
+            def.comments.insert(def.comments.begin(), d.comments.begin(), d.comments.end());
+            typedefs[name.text] = Type::named(Type::Kind::Enum, name.text);
+            return;
+        }
+        if (t.kind == Type::Kind::Enum && t.name.empty())
+            fail(file, at, "a pointer to an anonymous `enum`", "main-spec §4.6 has no such pointer.", "drop the `*`.");
+        if (t.kind == Type::Kind::Enum && t.name == name.text) {  // `typedef enum Color {…} Color;`
+            typedefs[name.text] = t;
+            if (!newDecls.empty()) newDecls.back().comments.insert(newDecls.back().comments.begin(),
+                                                                   d.comments.begin(), d.comments.end());
+            return;
+        }
         d.name = name.text;
         d.loc = name.loc;
         d.type = t;        // what the abbreviation stands for (printed with its own name, if it has one)
         t.alias = name.text;
         typedefs[name.text] = t;
+        newDecls.push_back(std::move(d));
+    }
+
+    // `enum Tag { … };` at file scope.
+    void parseEnumDecl(std::vector<Comment> comments) {
+        typeBodies = true;
+        parseEnumType();
+        typeBodies = false;
+        TypeDecl& d = newDecls.back();
+        d.comments.insert(d.comments.begin(), comments.begin(), comments.end());
+        if (!isPunct(";"))
+            failCode("E106", file, peek().loc, "a global variable of an `enum` type",
+                     "mutable globals are ⛔ (main-spec §7.3); Lean definitions are constants.",
+                     "pass the value as a parameter, or define the `enum` alone: `enum E { … };`.");
+        ++i;
         for (Comment& c : takeComments(i, false)) d.comments.push_back(std::move(c));
-        return d;
     }
 
     // The `int`, the name, the parameter list are already consumed by the caller.
@@ -1437,7 +1551,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             toks.push_back(t);
     }
 
-    Parser p{toks, comments, definedNames, definedValues, fileName, 0, 0, {}};
+    Parser p{toks, comments, definedNames, definedValues, fileName, 0, 0, {}, {}, false, {}};
     TranslationUnit unit;
     unit.fileName = fileName;
 
@@ -1463,8 +1577,18 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             continue;
         }
         if (p.isIdent("typedef")) {  // main-spec §4.5
-            unit.typeDecls.push_back(p.parseTypedef(std::move(pending)));
+            p.parseTypedef(std::move(pending));
             pending.clear();
+            for (TypeDecl& d : p.newDecls) unit.typeDecls.push_back(std::move(d));
+            p.newDecls.clear();
+            continue;
+        }
+        if (p.isIdent("enum") && (p.isPunctAt(p.i + 1, "{") ||
+                                  (p.toks[p.i + 1].kind == Token::Kind::Ident && p.isPunctAt(p.i + 2, "{")))) {
+            p.parseEnumDecl(std::move(pending));  // `enum E { … };` (main-spec §4.5)
+            pending.clear();
+            for (TypeDecl& d : p.newDecls) unit.typeDecls.push_back(std::move(d));
+            p.newDecls.clear();
             continue;
         }
         bool isPartial = false;

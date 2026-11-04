@@ -114,6 +114,7 @@ a branch is refused: C runs only the chosen branch, `(← f x)` would run first.
 | `void` (a return type)                                    | `Unit`                        |
 
 | `typedef T name;` (file scope)                            | `abbrev name := T`            |
+| `enum E { A, B = 3 };`, `enum E`, `typedef enum {…} E;`  | `inductive E` + `open E`      |
 
 `const` and `restrict` are ignored (§4.7). Every expression has a type
 (`Expr::type`, set by the checker).
@@ -128,6 +129,26 @@ parameters see through it). `T` may be any type above, a pointer form
 included (`typedef const char *text;`). Refused: a typedef of an array (the
 size would be lost, D13), of a function type (E107), of `void`; a name used
 twice; a type and a function of the same name (Lean has one namespace).
+
+`enum E { A, B };` (also `typedef enum { … } E;` and `typedef enum E { … } E;`)
+is `inductive E where | A | B deriving Repr, DecidableEq, Inhabited` plus
+`open E`, so enumerators stay bare. Each enumerator keeps its C value (written
+— a non-negative literal — or one more than the previous); `def E.toNat`
+spells them out whenever a value was written or the file converts an `E` to a
+number. In C an enumerator is an `int`, so wherever one meets anything but its
+own enum — `l + 1`, `(int)l`, `printf("%d", l)`, an `int` parameter — it is
+its value (`(↑l.toNat : Int)`). Between two values of one enum only `==`/`!=`
+exist (an `inductive` has no order). An `int` → enum conversion is refused
+(the integer may name no enumerator). `enum E x;` starts at the first
+enumerator (`default`).
+
+`switch` on an enum is a `match` on its constructors; when every enumerator has
+a case the `match` is total, gets no `| _` arm, counts as returning on every
+path, and the statements after it — C's safety-net `return 0;` — are dropped
+(main-spec §14.3). A `switch` on an integer may use enumerators as labels: they
+stand for their values. Refused: an `enum` defined inside a function, used
+before its definition, defined twice, empty, or with a global variable after
+it (E106); two enumerators of one name; an enumerator named like a function.
 
 **Mixed types (D19).** When two operands differ, the conversion of main-spec
 §5.3 is inserted for the one of lower rank, so the output always shows it:
@@ -310,8 +331,9 @@ The Lean helpers (`fgets`, `scanInt`, `parseFloat`, `hexOf`, …) are small
 `def`s printed at the top of the output, only the ones the file uses; their
 text lives in `src/prelude.cpp`. A function of the same name is refused.
 
-**Switch.** The scrutinee is `int` or `unsigned` (match patterns on the other
-types are unverified). Labels are integer literals (`3`, `-1`, `0x10`). Labels that
+**Switch.** The scrutinee is `int`, `unsigned` or an `enum` (match patterns on
+the other types are unverified). Labels are integer literals (`3`, `-1`,
+`0x10`) or enumerators (see **File-scope types**). Labels that
 follow each other become one or-pattern. Each case ends with `break;`, a
 `return`, or — inside a loop — a `continue` (all three mean "does not fall
 through"); `default` may sit anywhere and is emitted last; no `default` →
@@ -370,7 +392,7 @@ cannot (see `cases-lean-rejects`).
 
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
-`goto` and labels (**E102** — permanent, main-spec §6), structs, enums,
+`goto` and labels (**E102** — permanent, main-spec §6), structs,
 unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
@@ -585,8 +607,8 @@ missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
    before the loop and at its end); `atoi`/`strtol` (§12.2). (The
    uninitialised scalar local, `int n; scanf("%d", &n);`, is done: it starts
    at the type's zero, main-spec §4.5, lint W004.)
-3. Structs, enums (§4.5): typedefs landed the file-scope declarations
-   (`TranslationUnit::typeDecls`); enums also unlock `switch` on enums.
+3. Structs (§4.5): typedefs and enums landed the file-scope declarations
+   (`TranslationUnit::typeDecls`).
 3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
    give E301 its fix — and the `<string.h>` helpers (§12.3).
 4. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and

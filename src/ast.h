@@ -135,6 +135,7 @@ struct Stmt {
     std::vector<Stmt> step;             // For: the step (none, or one Assign/CallStmt)
     bool range = false;                 // For: check.cpp recognised a range-for (§6.1)
     bool inclusive = false;             // For, range: the condition was `<=` (hi becomes B+1)
+    bool exhaustive = false;            // Switch on an enum: every enumerator has a case, no `| _` (check.cpp)
     bool mut = false;                 // Decl: assigned again later → `let mut` (set by check.cpp)
     std::vector<long long> dims;      // Decl of an array: the declared sizes, outermost first
     bool noInit = false;              // Decl: `T a[N];` with no `=` (arrays are zero-filled, §4.4)
@@ -222,11 +223,19 @@ struct Function {
 // before every function (C declares a type before its first use, so source
 // order is already Lean's order).
 //   Alias   `typedef T name;` → `abbrev name := T`   (type = T)
+//   Enum    `enum E { A, B = 3 };` → `inductive E` + `open E` (+ `def E.toNat`)  (enumerators)
+struct Enumerator {
+    std::string name;
+    long long value = 0;  // C's value: written, or one more than the previous
+    Loc loc;
+};
 struct TypeDecl {
-    enum class Kind { Alias };
+    enum class Kind { Alias, Enum };
     Kind kind = Kind::Alias;
     std::string name;
     Type type;
+    std::vector<Enumerator> enumerators;  // Enum, in order
+    bool explicitValues = false;          // Enum: some value was written (`B = 3`) → `def E.toNat`
     std::vector<Comment> comments;  // above the declaration, and inside it
     int line = 0;                   // D9: `-- c: file:LINE`
     Loc loc;                        // the name, for diagnostics
@@ -235,7 +244,7 @@ struct TypeDecl {
 // One translated file.
 struct TranslationUnit {
     std::string fileName;               // base name, e.g. "arith.c", used in comments
-    std::vector<TypeDecl> typeDecls;    // typedefs …, source order (main-spec §4.5)
+    std::vector<TypeDecl> typeDecls;    // typedefs, enums …, source order (main-spec §4.5)
     std::vector<Function> functions;    // parser: source order; after sortDefinitions(): callees first
     std::set<std::string> pragmas;      // `#pragma lean NAME` words (set by main from the lexer)
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build

@@ -32,19 +32,29 @@ struct Type {
         Array,         // C `T a[N]`, `T *a`, `T a[M][N]`                   → `Array T`
         Unit,          // C `void` (return type only)                       → `Unit`
         File,          // C `FILE *` (only ever as a pointer)               → `IO.FS.Stream`
+        Enum,          // C `enum E`, name = E                               → `E` (an `inductive`)
     };
     Kind kind = Kind::Int;
     int width = 0;            // SInt/UInt: 8 16 32 64; BitVec: N; otherwise 0
     std::vector<Type> args;   // Array: the element type, as args[0]
+    std::string name;         // Enum: the type's name (part of its identity)
     std::string alias;        // the `typedef` name this type was written with (`byte`): printed instead of
                               // the Lean type, ignored by `==` (an `abbrev` is the type it abbreviates)
 
-    bool operator==(const Type& o) const { return kind == o.kind && width == o.width && args == o.args; }
+    bool operator==(const Type& o) const {
+        return kind == o.kind && width == o.width && args == o.args && name == o.name;
+    }
     bool operator!=(const Type& o) const { return !(*this == o); }
     static Type of(Kind k, int w = 0) {
         Type t;
         t.kind = k;
         t.width = w;
+        return t;
+    }
+    static Type named(Kind k, const std::string& n) {
+        Type t;
+        t.kind = k;
+        t.name = n;
         return t;
     }
     static Type arrayOf(const Type& elem) {
@@ -61,6 +71,7 @@ bool isFloat(Type t);     // Float32 / Float64 (not the literal)
 bool isArray(Type t);
 bool isString(Type t);
 bool isFile(Type t);
+bool isEnum(Type t);
 
 // The Lean spelling: `Int`, `UInt8`, `BitVec 8`, `Float`, `Bool`, …
 std::string leanName(Type t);

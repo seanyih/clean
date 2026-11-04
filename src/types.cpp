@@ -28,7 +28,7 @@ const std::set<std::string> kSupported = {
 // C type and storage words that exist in the main spec but are not built
 // yet: a pointed refusal beats "expected a declaration".
 const std::set<std::string> kRefused = {
-    "struct", "union", "enum", "static", "extern",
+    "struct", "union", "static", "extern",
     "inline", "volatile", "register", "_Atomic",
     "__int128", "int128_t", "uint128_t", "_Float16",
 };
@@ -93,6 +93,7 @@ bool isNumeric(Type t) {
     case Type::Kind::String:
     case Type::Kind::Array:
     case Type::Kind::File:
+    case Type::Kind::Enum:
     case Type::Kind::Unit: return false;
     default: return true;
     }
@@ -134,6 +135,7 @@ bool isFloat(Type t) { return t.kind == Type::Kind::Float32 || t.kind == Type::K
 bool isArray(Type t) { return t.kind == Type::Kind::Array; }
 bool isString(Type t) { return t.kind == Type::Kind::String; }
 bool isFile(Type t) { return t.kind == Type::Kind::File; }
+bool isEnum(Type t) { return t.kind == Type::Kind::Enum; }
 
 std::string leanName(Type t) {
     if (!t.alias.empty()) return t.alias;  // a `typedef` name: `abbrev byte := BitVec 8`
@@ -153,6 +155,7 @@ std::string leanName(Type t) {
     case Type::Kind::Array:        return "Array " + wrapName(t.elem());
     case Type::Kind::Unit:         return "Unit";
     case Type::Kind::File:         return "IO.FS.Stream";
+    case Type::Kind::Enum:         return t.name;
     }
     return "";
 }
@@ -175,6 +178,7 @@ std::string cName(Type t) {
     case Type::Kind::Array:        return cName(t.elem()) + "[]";
     case Type::Kind::Unit:         return "void";
     case Type::Kind::File:         return "FILE *";
+    case Type::Kind::Enum:         return "enum " + t.name;
     }
     return "";
 }
@@ -190,7 +194,7 @@ TypeWord classifyTypeWord(const std::string& word) {
 bool isBitVecWord(const std::string& word) { return word == "bv" || word == "_BitVec"; }
 
 std::string supportedTypesHint() {
-    return "`int`, `unsigned`, `uint8_t`/`int32_t`…, `bv(N)`, `bool`, `char`, `float`, `double`, `char *`, `FILE *` or an array";
+    return "`int`, `unsigned`, `uint8_t`/`int32_t`…, `bv(N)`, `bool`, `char`, `float`, `double`, `char *`, `FILE *`, an `enum`, a `typedef` name or an array";
 }
 
 TypeResolution makeBitVec(long long width) {
@@ -345,6 +349,9 @@ Unified unify(Type a, Type b, bool comparison) {
     }
     if (a.kind == K::Char) a = Type::of(K::Nat);
     if (b.kind == K::Char) b = Type::of(K::Nat);
+    // an enumerator is an `int` in C: met with anything but its own enum, it is its value
+    if (a.kind == K::Enum && !(a == b)) a = Type::of(K::Int);
+    if (b.kind == K::Enum && !(a == b)) b = Type::of(K::Int);
 
     if (a == b) {
         u.type = a;
@@ -413,6 +420,10 @@ OpRule checkBinaryOp(const std::string& op, Type t) {
     if (t.kind == Type::Kind::File)
         return refuse("E000", what + " is not translated", "a `FILE *` is a stream, not a number.",
                       "pass it to `fprintf`, `fgets`, `fclose`, … instead.");
+    if (t.kind == Type::Kind::Enum)
+        return refuse("E000", what + " is not translated",
+                      "an enumeration is a Lean `inductive`, not a number.",
+                      "convert it first: `(int)e` is its value.");
     if (t.kind == Type::Kind::String || t.kind == Type::Kind::Array || t.kind == Type::Kind::Unit)
         return refuse("E000", what + " is not translated",
                       "a `" + cName(t) + "` is not a number in Lean.",
@@ -453,6 +464,7 @@ OpRule checkBinaryOp(const std::string& op, Type t) {
         return refuse("E000", what + " is not translated", "C itself has no bitwise operators on floats.",
                       "convert to an integer type first.");
     case Type::Kind::File:
+    case Type::Kind::Enum:
     case Type::Kind::String:
     case Type::Kind::Array:
     case Type::Kind::Unit: return r;  // refused above
@@ -491,6 +503,7 @@ OpRule checkUnaryOp(const std::string& op, Type t) {
         case Type::Kind::String:
         case Type::Kind::Array:
         case Type::Kind::File:
+        case Type::Kind::Enum:
         case Type::Kind::Unit:
             return refuse("E000", what + " is not translated", "it is not a number in Lean.",
                           "convert to a number first.");
@@ -523,6 +536,7 @@ OpRule checkUnaryOp(const std::string& op, Type t) {
     case Type::Kind::String:
     case Type::Kind::Array:
     case Type::Kind::File:
+    case Type::Kind::Enum:
     case Type::Kind::Unit:
         return refuse("E000", what + " is not translated", "it is not a number in Lean.",
                       "convert to a number first.");
@@ -560,6 +574,7 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
         case K::Int:  // clamps negatives to 0 (lint W009)
         case K::UInt:
         case K::BitVec:
+        case K::Enum:  // `def E.toNat` is printed with the inductive (emitter.cpp)
         case K::Char: return x + ".toNat";
         case K::SInt: return x + ".toInt.toNat";
         default:      return "";
@@ -570,6 +585,7 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
         case K::Int:  return x;
         case K::Nat:  return "(↑" + x + " : Int)";
         case K::UInt:
+        case K::Enum:
         case K::Char: return "(↑" + x + ".toNat : Int)";
         case K::SInt: return x + ".toInt";
         default:      return "";  // BitVec is signless: no signed reading
@@ -674,6 +690,9 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
         std::string s = asNat();
         return s.empty() ? fail(kNoRow, "cast through `unsigned` first.") : "Char.ofNat " + s;  // W007
     }
+    case K::Enum:
+        return fail("an integer may hold a value no enumerator has; clean does not guess one (D5).",
+                    "pick the enumerator with a `switch` or `if`, e.g. `c = (n == 1) ? GREEN : RED;`.");
     case K::String:
     case K::Array:
     case K::File:
@@ -686,7 +705,7 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
 
 bool hasTruth(Type t) {
     return t.kind != Type::Kind::Char && t.kind != Type::Kind::Array && t.kind != Type::Kind::Unit &&
-           t.kind != Type::Kind::File;
+           t.kind != Type::Kind::File && t.kind != Type::Kind::Enum;
 }
 
 std::string truthTest(Type t, const std::string& x) {
@@ -700,6 +719,7 @@ std::string truthTest(Type t, const std::string& x) {
     case Type::Kind::Char:
     case Type::Kind::Array:
     case Type::Kind::File:
+    case Type::Kind::Enum:
     case Type::Kind::Unit:         return "";
     case Type::Kind::Literal:
     case Type::Kind::Int:
@@ -748,6 +768,10 @@ OpRule checkCompare(const std::string& op, Type t) {
                       "drop the comparison.");
     case Type::Kind::Unit:
         return refuse("comparison of `void`", "there is no value.", "remove it.");
+    case Type::Kind::Enum:
+        if (!eq) return refuse("`" + op + "` on `" + cName(t) + "`", "a Lean `inductive` has no order; only `==` and `!=`.",
+                               "compare the values: `(int)a < (int)b`.");
+        return r;
     default: return r;
     }
 }
@@ -767,6 +791,7 @@ std::string zeroValue(Type t) {
     case Type::Kind::Char:         return "'\\x00'";
     case Type::Kind::String:       return "\"\"";
     case Type::Kind::Array:        return "#[]";
+    case Type::Kind::Enum:         return "default";  // the first enumerator (`deriving Inhabited`)
     case Type::Kind::File:
     case Type::Kind::Unit:         return "()";
     }

@@ -7,6 +7,8 @@
 //
 //   file      :=  ( comment | ';' | typedef | prototype | function | print )*  EOF
 //   typedef   :=  'typedef' type '*'* IDENT ';'          (main-spec §4.5)
+//   enumdecl  :=  'enum' IDENT? '{' IDENT ('=' INTLIT)? (',' IDENT ('=' INTLIT)?)* ','? '}' ';'
+//                 (also as the `type` of a typedef; `enum IDENT` names a defined one)
 //   prototype :=  type IDENT '(' params ')' ';'
 //   function  :=  attr* type IDENT '(' params ')' block
 //   attr      :=  '[[' 'lean' '::' 'partial' ']]'
@@ -32,7 +34,7 @@
 //              |  'fprintf' '(' ('stderr'|'stdout') ',' STRINGLIT (',' expr)* ')' ';'
 //              |  ('puts' | 'putchar') '(' expr ')' ';'
 //   body      :=  block | stmt
-//   group     :=  ( 'case' ['-'] INTLIT ':' | 'default' ':' )+ stmt*
+//   group     :=  ( 'case' (['-'] INTLIT | IDENT) ':' | 'default' ':' )+ stmt*
 //   expr      :=  cond '?' expr ':' expr   (right-associative)  |  cond
 //   cond      :=  C precedence:  ||  &&  |  ^  &  == !=  < <= > >=  << >>  + -  * / %
 //                 unary - ! ~  and the cast '(' type ')' unary

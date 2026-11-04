@@ -418,7 +418,7 @@ void emitSwitch(const Stmt& s, int level, const std::string& wret, bool yield, s
     }
     if (dflt) {
         arm(*dflt, "_");
-    } else {  // C: no default → nothing happens (a writer: return the array as it is)
+    } else if (!s.exhaustive) {  // C: no default → nothing happens (a writer: return the array as it is)
         out += pad(level) + "| _ =>\n" + pad(level + 1) +
                (yield ? "return " + wret : "pure ()") + "\n";
     }
@@ -828,6 +828,24 @@ void emitFunction(const Function& f, const std::string& fileName, std::string& o
     emitStmts(f.body, 1, wret, writer, out, &f.bodyTrailing);
 }
 
+// Is an enumerator of `name` converted to a number anywhere (an explicit or
+// implicit `Cast` from the enum)? Then `def E.toNat` is printed with it.
+bool castsFrom(const Expr& e, const std::string& name) {
+    if (e.kind == Expr::Kind::Cast && e.kids[0].type.kind == Type::Kind::Enum && e.kids[0].type.name == name)
+        return true;
+    for (const Expr& k : e.kids)
+        if (castsFrom(k, name)) return true;
+    return false;
+}
+
+bool enumValueUsed(const TranslationUnit& unit, const std::string& name) {
+    bool used = false;
+    auto look = [&](const Expr& e) { used = used || castsFrom(e, name); };
+    for (const Function& f : unit.functions) forEachExpr(f.body, look);
+    forEachExpr(unit.scripts, look);
+    return used;
+}
+
 }  // namespace
 
 std::string emit(const TranslationUnit& unit) {
@@ -842,6 +860,16 @@ std::string emit(const TranslationUnit& unit) {
         switch (d.kind) {
         case TypeDecl::Kind::Alias:
             out += "abbrev " + d.name + " := " + leanName(d.type) + "\n";
+            break;
+        case TypeDecl::Kind::Enum:  // main-spec §4.5: the inductive, `open` for bare enumerators
+            out += "inductive " + d.name + " where\n";
+            for (const Enumerator& en : d.enumerators) out += "  | " + en.name + "\n";
+            out += "  deriving Repr, DecidableEq, Inhabited\nopen " + d.name + "\n";
+            if (d.explicitValues || enumValueUsed(unit, d.name)) {  // C's value of each enumerator
+                out += "\ndef " + d.name + ".toNat : " + d.name + " → Nat\n";
+                for (const Enumerator& en : d.enumerators)
+                    out += "  | " + en.name + " => " + std::to_string(en.value) + "\n";
+            }
             break;
         }
     }
