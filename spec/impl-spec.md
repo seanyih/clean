@@ -64,6 +64,7 @@ from the main spec's D7 table):
 | C                                    | Lean                                          |
 | ------------------------------------ | --------------------------------------------- |
 | `T x = e;` (any scalar type)         | `let x : T' := e` (`let mut` if reassigned)   |
+| `T x;` (no initialiser)              | `let x : T' := 0` — the type's zero (§4.5, W004) |
 | `x = e;`  `x += e;`  `x++;`          | `x := e`  `x := x + e`  `x := x + 1`          |
 | `T a[N] = {…};`  `T a[N];`           | `let a : Array T := #[…]` / `Array.replicate N …` |
 | `a[i] = e;`  `a[i][j] += e;`         | `a := a.set! i e`  `a := a.set! i (a[i]!.set! j (a[i]![j]! + e))` |
@@ -144,6 +145,12 @@ on strings; a `bool` as is; a `char` or an array is refused). Where a
 operators are `Bool` values: `decide (a < b)`, `&&`, `||`, `!`. Anywhere
 else a comparison is refused: C would make it 0 or 1, and clean does not
 guess a coercion.
+
+**Uninitialised locals** (main-spec §4.5). `T x;` starts at the type's zero
+— `0`, `0#8`, `0.0`, `false`, `'\x00'`, `""` — so `int n; scanf("%d", &n);` and
+`char buf[64]; sprintf(buf, …);` read as in C; `--lint=c-semantics` reports it
+(W004: C leaves the value indeterminate). A `FILE *f;` is refused (a stream has
+no zero), and so is `int a, b;` (one variable per declaration).
 
 **Void.** A `void` function is `: Unit`; `return;` is `return ()`, falling
 off the end is fine, and the body of a non-trivial one ends in `pure ()`.
@@ -349,7 +356,7 @@ mutual) without any attribute — the `nat_*` cases rely on that; on `Int` it
 cannot (see `cases-lean-rejects`).
 
 Not translated yet (each is a hard error with location + why + fix):
-uninitialised scalar locals (`int x;`; arrays may be uninitialised),
+several declarators in one declaration (`int a, b;`),
 `goto` and labels (**E102** — permanent, main-spec §6), structs, enums,
 typedefs, unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types
@@ -470,7 +477,7 @@ missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
 
 - **D3** idiomatic output: `def`, merged parameter groups, minimal parentheses.
 - **D5** reject, never guess: unknown identifiers, macro uses, arity
-  mismatches, missing returns, uninitialised locals and comparisons-as-numbers
+  mismatches, missing returns and comparisons-as-numbers
   are caught *before* emission, so the emitted Lean has no name or scope
   errors left to find.
 - **D8** names preserved verbatim; a Lean keyword as a C name is a hard error.
@@ -562,9 +569,9 @@ missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
    slice 9; loops now make read-until-EOF programs work (case `input_loops`).
    What it needs next: assignment inside a condition, so `while ((c =
    getchar()) != EOF)` can be written as in C (today: E103, write the read out
-   before the loop and at its end); `atoi`/`strtol` (§12.2); an uninitialised
-   scalar local (`int n; scanf("%d", &n);`), which main-spec W004 plans as
-   zero-initialisation.
+   before the loop and at its end); `atoi`/`strtol` (§12.2). (The
+   uninitialised scalar local, `int n; scanf("%d", &n);`, is done: it starts
+   at the type's zero, main-spec §4.5, lint W004.)
 3. Structs, enums, typedefs (§4.5): they need file-scope declarations in the
    AST, which is the next structural step. Also unlocks `switch` on enums.
 3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also

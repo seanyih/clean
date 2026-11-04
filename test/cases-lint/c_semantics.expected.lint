@@ -1,4 +1,4 @@
-W001  c_semantics.c:9:1  `int divide(…)` is an `int`: Lean's `Int` is unbounded  (+5 more in this file)
+W001  c_semantics.c:9:1  `int divide(…)` is an `int`: Lean's `Int` is unbounded  (+7 more in this file)
       why:  C's `int` wraps at 32 bits; clean maps the `int` family to `Int` and emulates nothing (D4).
       fix:  use `int32_t` (or another `intN_t`) where a fixed width is meant.
 W005  c_semantics.c:9:35  `/` by a value that may be zero
@@ -25,3 +25,6 @@ W010  c_semantics.c:24:36  `a[i]` panics when the index is out of range
 W011  c_semantics.c:25:38  indexing a string is O(n)
       why:  `s.toList[i]!` builds the whole character list on every access.
       fix:  avoid indexing in loops; use a `uint8_t` array for byte buffers.
+W004  c_semantics.c:28:24  `z` has no initial value and starts at 0
+      why:  C leaves an uninitialised local indeterminate; Lean has no such thing, so clean starts it at zero (main-spec §4.5).
+      fix:  initialise it: `int z = …;`.

@@ -152,6 +152,11 @@ struct Linter {
     void stmts(const std::vector<Stmt>& list) {
         for (const Stmt& s : list) {
             if (s.kind == Stmt::Kind::Decl) type(s.type, s.loc, cName(s.type) + " " + s.name);
+            if (s.kind == Stmt::Kind::Decl && s.noInit && s.type.kind != Type::Kind::Array)
+                report("W004", s.loc, "`" + s.name + "` has no initial value and starts at " + zeroValue(s.type),
+                       "C leaves an uninitialised local indeterminate; Lean has no such thing, so clean "
+                       "starts it at zero (main-spec §4.5).",
+                       "initialise it: `" + cName(s.type) + " " + s.name + " = …;`.");
             // a range-for's loop variable is consumed by the range, but is still
             // an `int`/`unsigned` in the C file — the general form's initialiser
             // is an ordinary Decl and lints the same way

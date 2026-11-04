@@ -15,12 +15,11 @@ Messages render exactly as main-spec §13.1 prescribes (implemented in
 ```
 
 Errors (E) and hints (H) are always shown. Lints (W) are off by default and
-come with `--lint=c-semantics` (W001–W011, W014 and W006, plus the provisional W015, W016); W012/W013 come with the
+come with `--lint=c-semantics` (W001–W011, W014 and W004, W006, plus the provisional W015, W016); W012/W013 come with the
 features that trigger them. Each lint is reported once per kind per file: the
 first place, plus a count of the others. A lint never changes the translation
 or the exit code (decision D18; `src/lint.cpp`). Not built because their
-feature does not exist yet: W003 (`long double`), W004 (uninitialised locals
-are still refused), W012, W013.
+feature does not exist yet: W003 (`long double`), W012, W013.
 
 **E000 — the build's placeholder, not a catalogue code.** Every refusal that
 has no permanent number yet is reported as E000. Two flavours:
@@ -78,7 +77,7 @@ Status legend: ✅ emitted today (file that throws it) · ⚠️ partial ·
 | W001 | lint          | `int`-family is unbounded `Int`                                                                      | `intN_t` for fixed width                                                   | ✅ lint.cpp (`--lint=c-semantics`) |
 | W002 | lint          | `Nat` subtraction truncates at 0                                                                     | `--unsigned=int` or guard                                                  | ✅ lint.cpp |
 | W003 | lint          | `long double` → `Float`                                                                              | —                                                                          | ❌ no lint pass (`long double` → `Float` is translated silently) |
-| W004 | lint          | uninitialised variable zero-initialised                                                              | initialise                                                                 | ❌ today `int x;` is refused outright (E000, "picking a value would be guessing"); zero-init + W004 arrives with that slice |
+| W004 | lint          | uninitialised variable zero-initialised                                                              | initialise                                                                 | ✅ lint.cpp (`int x;` and other scalars start at their zero, main-spec §4.5; arrays are §4.4's default fill, not reported) |
 | W005 | lint          | division by zero is `0`                                                                              | guard                                                                      | ✅ lint.cpp |
 | W006 | lint          | `printf` width/precision ignored                                                                     | —                                                                          | ✅ lint.cpp: any width/flag/precision, and every `%f %g %e` (Lean's float text differs) |
 | W007 | lint          | `char` ↔ integer conversion                                                                           | `uint8_t`                                                                  | ✅ lint.cpp (casts between `char` and integers, inserted or written) |

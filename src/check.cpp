@@ -950,7 +950,7 @@ struct Checker {
     void forStmt(Stmt& s) {
         // ---- the pattern, piece by piece; any miss falls to the general form ----
         bool ok = s.init.size() == 1 && s.init[0].kind == Stmt::Kind::Decl &&
-                  s.init[0].dims.empty() &&
+                  s.init[0].dims.empty() && !s.init[0].noInit &&
                   (s.init[0].type.kind == Type::Kind::Int ||
                    s.init[0].type.kind == Type::Kind::Nat ||
                    s.init[0].type.kind == Type::Kind::UInt);
@@ -1117,7 +1117,7 @@ struct Checker {
 
     void declStmt(Stmt& s) {
         if (s.type.kind != Type::Kind::Array) {
-            valueAs(s.expr, s.type);
+            if (!s.noInit) valueAs(s.expr, s.type);  // `int x;` starts at zero (§4.5, the emitter writes it)
             return;
         }
         for (size_t d = 1; d < s.dims.size(); ++d)

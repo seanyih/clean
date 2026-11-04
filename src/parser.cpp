@@ -1088,15 +1088,15 @@ struct Parser {
             fail(file, typeAt, "a variable of type `void`", "`void` has no values.", "use a real type.");
         while (isPunct("[")) s.dims.push_back(parseArraySize());
         s.type = declare(base, stars, s.dims.size(), typeAt, false);
-        if (isPunct(",") || (isPunct(";") && s.dims.empty()))
-            fail(file, name.loc, "local `" + name.text + "` has no initial value",
-                 "Lean has no uninitialised variables, and picking a value would be guessing (D5).",
-                 "give it an initial value, e.g. `= 0`.");
-        if (isPunct(";")) {  // `T a[N];` — arrays are filled with default values (§4.4)
-            if (s.type.kind != Type::Kind::Array)
-                fail(file, name.loc, "local `" + name.text + "` has no initial value",
-                     "Lean strings are immutable, so an empty `char s[N]` could never be filled.",
-                     "write the string: `char s[] = \"…\";`.");
+        if (isPunct(","))
+            fail(file, peek().loc, "several variables in one declaration",
+                 "each C declarator becomes its own Lean `let`; clean reads one per statement.",
+                 "declare one variable per statement: `int a = 0; int b = 0;`.");
+        if (isPunct(";") && s.type.kind == Type::Kind::File)
+            fail(file, name.loc, "the stream `" + name.text + "` has no initial value",
+                 "a Lean stream has no \"nothing\" value to start from (clean has no `NULL`).",
+                 "declare it where you open it: `FILE *f = fopen(…);`.");
+        if (isPunct(";")) {  // `T x;` — zero (main-spec §4.5, lint W004); `T a[N];` — default values (§4.4)
             for (long long d : s.dims)
                 if (d < 0)
                     fail(file, name.loc, "the size of the array `" + name.text + "` is missing",

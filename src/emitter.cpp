@@ -603,6 +603,7 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
         case Stmt::Kind::Decl:
             out += pad(level) + (s.mut ? "let mut " : "let ") + s.name + " : " + leanName(s.type) + " := ";
             if (s.type.kind == Type::Kind::Array) out += arrayInit(s);
+            else if (s.noInit) out += zeroValue(s.type);  // `int x;` (main-spec §4.5, lint W004)
             else emitExpr(s.expr, out);
             out += "\n";
             break;
