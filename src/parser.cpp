@@ -633,12 +633,12 @@ struct Parser {
             return parseBvLiteral();
         if (t.kind == Token::Kind::Ident && isLibraryConstant(t.text)) {  // EXIT_FAILURE, EOF, …
             ++i;
-            const long long v = libraryConstant(t.text);
+            const std::string v = libraryConstant(t.text);
             Expr e;
             e.kind = Expr::Kind::IntLit;
-            e.text = std::to_string(v < 0 ? -v : v);
+            e.text = v[0] == '-' ? v.substr(1) : v;
             e.loc = t.loc;
-            if (v >= 0) return e;
+            if (v[0] != '-') return e;
             Expr neg;  // written as the `-1` C's `EOF` stands for
             neg.kind = Expr::Kind::UnaryNeg;
             neg.loc = t.loc;
@@ -646,7 +646,10 @@ struct Parser {
             return neg;
         }
         if (t.kind == Token::Kind::Ident) {
-            if (macros.count(t.text))
+            // `#define max(a, b) …` is the idiom main-spec §12.2 maps to Lean's `min`/`max`
+            const bool minMaxIdiom = stdShape(t.text) == StdShape::MinMax && peek2().kind == Token::Kind::Punct &&
+                                     peek2().text == "(";
+            if (macros.count(t.text) && !minMaxIdiom)
                 fail(file, t.loc,
                      "macro `" + t.text + "` is used, but macros are not expanded in this slice",
                      "a macro name is not a Lean name; expanding it would be guessing.",

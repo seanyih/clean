@@ -20,6 +20,14 @@ const std::vector<Helper>& table() {
         {"hexOf", {},
          "-- helper for printf `%x` / `%X` (main-spec §8.1)\n"
          "def hexOf (n : Nat) : String := String.ofList (Nat.toDigits 16 n)\n"},
+        {"strcmp", {},
+         R"LEAN(-- helper for strcmp: the sign of the comparison, as C's `int` (main-spec §12.3)
+def strcmp (a b : String) : Int :=
+  match compare a b with
+  | .lt => -1
+  | .eq => 0
+  | .gt => 1
+)LEAN"},
         {"fgetc", {},
          R"LEAN(-- helper for fgetc/getc: one byte as an int, -1 at the end of the input (main-spec §8.1)
 def fgetc (f : IO.FS.Stream) : IO Int := do

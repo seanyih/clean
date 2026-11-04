@@ -722,6 +722,7 @@ struct Checker {
                      "function values are not translated.",
                      "call a defined function, or drop the call.");
             if (classifyLibName(e.text) == LibName::BitVec) return bitVecHelper(e);
+            if (stdShape(e.text) != StdShape::None && !sigs.count(e.text)) return stdCall(e);
             LibSignature lib;
             if (libSignature(e.text, lib)) {
                 if (lib.params.size() != e.kids.size())
@@ -775,7 +776,7 @@ struct Checker {
             } else {
                 Type a = value(e.kids[1]);
                 Type b = value(e.kids[2]);
-                Unified u = unify(a, b);  // equal types meet as they are (bool, char, string too)
+                Unified u = unify(a, b, true);  // equal types meet as they are (two chars stay `Char`, as in a comparison)
                 if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
                 coerce(e.kids[1], u.type);
                 coerce(e.kids[2], u.type);
@@ -799,6 +800,71 @@ struct Checker {
                  "use it as an `if` condition (`if (c) x = 1; else x = 0;`), or store it in a `bool`.");
         }
         return e.type;  // unreachable: every case above returns or throws
+    }
+
+    // ---- the pure C library (main-spec §12) ----------------------------------------------
+
+    Type stdCall(Expr& e) {
+        const StdShape shape = stdShape(e.text);
+        const size_t want = shape == StdShape::Math2 || shape == StdShape::MinMax || shape == StdShape::StrCmp ||
+                                    shape == StdShape::StrCat ? 2 : 1;
+        if (e.kids.size() != want)
+            fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(want) + " argument(s) but is called with " +
+                     std::to_string(e.kids.size()),
+                 "the arity is checked here so that Lean does not have to report it.", "match the C library's signature.");
+        e.lib = true;
+        const Type dbl = Type::of(Type::Kind::Float64), flt = Type::of(Type::Kind::Float32);
+        const Type str = Type::of(Type::Kind::String), chr = Type::of(Type::Kind::Char);
+        switch (shape) {
+        case StdShape::Math1:
+        case StdShape::Math2: {
+            const Type t = stdFloat32(e.text) ? flt : dbl;
+            for (Expr& k : e.kids) valueAs(k, t);  // `sqrt(n)` with an `int` n: `Float.sqrt (Float.ofInt n)` (D19)
+            return t;
+        }
+        case StdShape::FloatTest: {
+            const Type t = value(e.kids[0]);
+            valueAs(e.kids[0], t.kind == Type::Kind::Float32 ? flt : dbl);
+            return Type::of(Type::Kind::Bool);
+        }
+        case StdShape::Abs:  // C's `int abs(int)`: `(↑(Int.natAbs x) : Int)`
+            valueAs(e.kids[0], Type::of(Type::Kind::Int));
+            return Type::of(Type::Kind::Int);
+        case StdShape::MinMax: {
+            Type a = value(e.kids[0]), b = value(e.kids[1]);
+            Unified u = unify(a, b);
+            if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
+            if (u.type.kind == Type::Kind::Literal) u.type = Type::of(Type::Kind::Int);
+            if (u.type.kind == Type::Kind::FloatLiteral) u.type = dbl;
+            OpRule r = checkCompare("<", u.type);
+            if (!r.ok) failDiag(r.code, e.loc, r.problem, r.why, r.fix);
+            coerce(e.kids[0], u.type);
+            coerce(e.kids[1], u.type);
+            return u.type;
+        }
+        case StdShape::StrLen:
+            valueAs(e.kids[0], str);
+            return Type::of(Type::Kind::Nat);
+        case StdShape::StrCmp:
+            valueAs(e.kids[0], str);
+            valueAs(e.kids[1], str);
+            helpers.insert("strcmp");
+            return Type::of(Type::Kind::Int);
+        case StdShape::CharTest:
+        case StdShape::CharMap:
+            valueAs(e.kids[0], chr);  // C passes an `int`; Lean's tests take a `Char` (W007 for the conversion)
+            return shape == StdShape::CharTest ? Type::of(Type::Kind::Bool) : chr;
+        case StdShape::StrCat:
+        case StdShape::Assert:
+            fail(file, e.loc, "the result of `" + e.text + "(…)` is used as a value",
+                 shape == StdShape::StrCat ? "`strcat` changes its first argument; Lean strings are values, so it is "
+                                             "translated as the statement `dst := dst ++ src`."
+                                           : "`assert` is a statement (`assert! c`).",
+                 "call it as a statement, on its own line.");
+        case StdShape::None:
+            break;
+        }
+        return Type::of(Type::Kind::Unit);  // unreachable
     }
 
     // ---- the bit-vector helpers (main-spec §5.4) ---------------------------------------
@@ -1062,6 +1128,29 @@ struct Checker {
 
     // `f(args);` — the CallStmt case of `stmts`, also a `for` header part.
     void callStmt(Stmt& s) {
+        const StdShape shape = sigs.count(s.expr.text) ? StdShape::None : stdShape(s.expr.text);
+        if (shape == StdShape::Assert || shape == StdShape::StrCat) {  // main-spec §12.3, §12.5
+            Expr& e = s.expr;
+            if (e.kids.size() != (shape == StdShape::Assert ? 1u : 2u))
+                fail(file, e.loc, "`" + e.text + "` is called with the wrong number of arguments",
+                     "the arity is checked here so that Lean does not have to report it.",
+                     "match the C library's signature.");
+            e.lib = true;
+            e.type = Type::of(Type::Kind::Unit);
+            if (shape == StdShape::Assert) {  // `assert! c`: a run-time check, not a proof obligation
+                cond(e.kids[0]);
+                noIO(e.kids[0]);
+                return;
+            }
+            if (e.kids[0].kind != Expr::Kind::Ident)
+                fail(file, e.kids[0].loc, "`strcat` appends to something that is not a variable",
+                     "the new string is assigned back, so it must be a whole variable.", "append to a string variable.");
+            valueAs(e.kids[0], Type::of(Type::Kind::String));
+            valueAs(e.kids[1], Type::of(Type::Kind::String));
+            markAssigned(e.kids[0].text, e.kids[0].loc);
+            s.writeBack = e.kids[0].text;  // `dst := dst ++ src`
+            return;
+        }
         s.expr.type = valueType(s.expr);  // name, arity and arguments
         if (s.expr.type.kind != Type::Kind::Unit)
             fail(file, s.expr.loc, "the result of `" + s.expr.text + "(…)` is discarded",

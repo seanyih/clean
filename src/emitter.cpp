@@ -45,6 +45,7 @@
 #include <map>
 #include <vector>
 
+#include "builtins.h"
 #include "prelude.h"
 #include "types.h"
 
@@ -93,7 +94,10 @@ int level(const Expr& e) {
     case Expr::Kind::Cmp:    return cmpIsBool(cmpType(e), e.text) ? 50 : 90;  // `a == b` / `decide (…)`
     case Expr::Kind::And:    return 35;
     case Expr::Kind::Or:     return 30;
-    case Expr::Kind::Call:   return e.text == "bv_cat" ? 65 : e.io ? 100 : 90;  // `a ++ b`; `(← f x)` is an atom
+    case Expr::Kind::Call:   // `a ++ b` (bv_cat, strcat); `(↑(Int.natAbs x) : Int)` is an atom; `(← f x)` too
+        if (e.text == "bv_cat" || (e.lib && e.text == "strcat")) return 65;
+        if (e.lib && stdShape(e.text) == StdShape::Abs) return 100;
+        return e.io ? 100 : 90;
     case Expr::Kind::Not:
     case Expr::Kind::Cast:   return 90;
     case Expr::Kind::Cond:   return 10;   // `if … then … else …` swallows everything to its right
@@ -182,6 +186,33 @@ bool emitBitVecHelper(const Expr& e, std::string& out) {
 
 void emitCall(const Expr& e, std::string& out) {
     if (emitBitVecHelper(e, out)) return;
+    if (e.lib) {  // the pure C library (main-spec §12)
+        switch (stdShape(e.text)) {
+        case StdShape::Abs: {
+            std::string x;
+            emitAtom(e.kids[0], x);
+            out += convert(Type::of(Type::Kind::Nat), Type::of(Type::Kind::Int), "(Int.natAbs " + x + ")", nullptr, nullptr);
+            return;
+        }
+        case StdShape::StrCat:  // `strcat(dst, src)` → `dst ++ src`
+            emitChild(e.kids[0], 65, false, out);
+            out += " ++ ";
+            emitChild(e.kids[1], 65, true, out);
+            return;
+        case StdShape::MinMax:
+        case StdShape::StrCmp:
+            out += e.text;  // Lean's `min`/`max`, and the generated `strcmp` helper
+            break;
+        default:
+            out += stdSpelling(e.text, e.kids[0].type.kind == Type::Kind::Float32);
+            break;
+        }
+        for (const Expr& a : e.kids) {
+            out += ' ';
+            emitAtom(a, out);
+        }
+        return;
+    }
     out += e.text;
     for (const Expr& arg : e.kids) {
         out += ' ';
@@ -739,6 +770,12 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
             out += "\n";
             break;
         case Stmt::Kind::CallStmt:
+            if (s.expr.lib && s.expr.text == "assert") {  // `assert(c)` → `assert! c` (main-spec §12.5)
+                out += pad(level) + "assert! ";
+                emitCond(s.expr.kids[0], out);
+                out += "\n";
+                break;
+            }
             if (s.expr.io) {  // an I/O function: run it; a writer's array is bound back with `←`
                 out += pad(level) + (s.writeBack.empty() ? "" : s.writeBack + " ← ");
             } else if (!s.writeBack.empty()) {  // a writer call: the modified array comes back (OD11 c)

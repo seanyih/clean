@@ -216,6 +216,32 @@ signed readings and the width changes have names; each is pure and takes
 `setWidth`, `signExtend`, `getLsbD`, `rotateLeft`/`rotateRight`, `sdiv` exist).
 The names are reserved: a user function `bv_cat` is refused.
 
+**The pure C library** (main-spec §12). Translated by name, unless the file
+defines a function of that name (then that one is called — C programs often
+write their own `min`). Arguments convert as for any call (D19).
+
+| C                                              | Lean                                        |
+| ---------------------------------------------- | ------------------------------------------- |
+| `sqrt cbrt exp exp2 log log2 log10 sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh floor ceil round fabs`, `pow atan2` | `Float.sqrt x` …, `Float.abs`; the `…f` names (`sqrtf`) are `Float32.*` |
+| `isnan isinf isfinite`                         | `Float.isNaN` … — a `bool` (C: `int`)        |
+| `abs labs llabs`                               | `(↑(Int.natAbs x) : Int)`                   |
+| `min(a, b)`, `max(a, b)` (also as the `#define` idiom) | `min a b`, `max a b` (operands unify as for `<`) |
+| `INT8_MIN` … `INT64_MAX`, `UINT8_MAX` … `UINT64_MAX`, `INT_MAX`, `INT_MIN`, `UINT_MAX`, `CHAR_BIT` | their value, a literal (it adapts to its use, D19) |
+| `strlen(s)`                                    | `String.length s` (a `Nat`; characters, not bytes) |
+| `strcmp(a, b)`                                 | `strcmp a b`: a generated helper, -1 / 0 / 1 |
+| `strcat(dst, src);` (a statement)              | `dst := dst ++ src`                         |
+| `isdigit isalpha isalnum isspace isupper islower` | `Char.isDigit c` … — a `bool` (C: `int`) |
+| `toupper tolower`                              | `Char.toUpper c`, `Char.toLower c`          |
+| `assert(c);`                                   | `assert! c'` — a run-time check (it panics), not a proof |
+
+Every Lean name was checked on 4.35.0. Where C returns an `int` truth value
+(`isdigit`, `isnan`) the result is a `bool`, so `int r = isdigit(c);` is
+refused like any `bool` → `int` (write `isdigit(c) ? 1 : 0`). `strcmp`'s
+result is only the sign (C promises no more). The main spec spells `INT32_MAX`
+as `Int32.maxValue.toInt`; the literal is the same number and also fits an
+`int32_t` or `uint8_t` context without a conversion. Refused: `strcat` used as
+a value or appending to a non-variable, `assert`/`strcat` outside a statement.
+
 **Tests.** `< <= > >= == != && || !` are allowed where a test is expected
 (an `if` condition, or inside another test) and become Lean propositions:
 `==` → `=`, `!=` → `≠`, `&&` → `∧`, `||` → `∨`, `!` → `¬`; on floats `==`
@@ -469,7 +495,8 @@ cannot (see `cases-lean-rejects`).
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
 `goto` and labels (**E102** — permanent, main-spec §6),
-unions, compound literals (`(struct P){1, 2}`), the `<string.h>` helpers, `switch` on types
+unions, compound literals (`(struct P){1, 2}`), `strcpy`/`memcpy`/`memset`,
+`fmod`/`hypot`/`lround`, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
 one is an error, not a silent wrong name), Sparkle, theorems.
@@ -684,6 +711,5 @@ missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
    before the loop and at its end); `atoi`/`strtol` (§12.2). (The
    uninitialised scalar local, `int n; scanf("%d", &n);`, is done: it starts
    at the type's zero, main-spec §4.5, lint W004.)
-3. The `<string.h>` helpers (§12.3). (The §5.4 bit-vector helpers are done.)
 4. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and
    a tuple return for non-`void` writers / several written arrays.

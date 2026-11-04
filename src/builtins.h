@@ -47,11 +47,38 @@ bool libSignature(const std::string& name, LibSignature& out);
 // (a width or a bit position): `bv_zext(N, x)` → 0, `bv_ext(x, hi, lo)` → 1 and 2.
 bool bitVecConstArg(const std::string& name, size_t k);
 
-// Constants the C headers define as macros (`EXIT_FAILURE`, `EOF`, …). The tool
-// does not expand macros, so it knows these few by name; the parser turns each
-// into the integer expression of `libraryConstant`'s value.
+// Constants the C headers define as macros (`EXIT_FAILURE`, `EOF`, `INT32_MAX`, …). The
+// tool does not expand macros, so it knows these by name; the parser turns each into
+// the integer literal of `libraryConstant`'s value (decimal text, a leading `-` when
+// negative), which takes the type of wherever it is used like any literal (D19).
 bool isLibraryConstant(const std::string& name);
-long long libraryConstant(const std::string& name);
+std::string libraryConstant(const std::string& name);
+
+// ---- the pure C library functions of main-spec §12 ---------------------------------
+//
+// `<math.h>`, `abs`/`min`/`max`, `<string.h>`'s `strlen`/`strcmp`/`strcat`, `<ctype.h>`,
+// `assert`. They translate by name — unless the file defines a function of that name,
+// which then wins (C programs often write their own `min`/`max`). check.cpp types the
+// call (`stdShape`) and marks it `Expr::lib`; emitter.cpp spells it (`stdSpelling`).
+enum class StdShape {
+    None,
+    Math1,     // double f(double)        sqrt exp log sin floor …   (`…f`: the float version)
+    Math2,     // double f(double, double) pow atan2                 (`…f`: the float version)
+    FloatTest, // bool f(double)          isnan isinf isfinite      (C: int)
+    Abs,       // int abs(int)            abs labs llabs
+    MinMax,    // T min(T, T)             min max (the macro idiom; operands unify like `a + b`)
+    StrLen,    // size_t strlen(s)
+    StrCmp,    // int strcmp(a, b)        -1 / 0 / 1 (a generated helper)
+    StrCat,    // strcat(dst, src)        a statement: `dst := dst ++ src`
+    CharTest,  // bool f(char)            isdigit isalpha isalnum isspace isupper islower (C: int)
+    CharMap,   // char f(char)            toupper tolower
+    Assert,    // assert(c)               a statement: `assert! c`
+};
+StdShape stdShape(const std::string& name);
+bool stdFloat32(const std::string& name);  // `sqrtf`, `powf`, … work on `float`
+// The Lean function a Math1/Math2/FloatTest/CharTest/CharMap/StrLen call becomes, given whether its
+// operand is a `float` (`Float.sqrt`, `Float32.sqrt`, `Char.isDigit`, `String.length`).
+std::string stdSpelling(const std::string& name, bool float32);
 
 // `stdin`, `stdout`, `stderr`: the three streams every program has.
 bool isStandardStream(const std::string& name);
