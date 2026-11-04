@@ -7,6 +7,7 @@
 //
 //   file      :=  ( comment | ';' | typedef | enumdecl | structdecl | global | prototype | function | print )*  EOF
 //   global    :=  a local declaration whose type words include `const` (main-spec §7.3; else E106)
+//   extern    :=  'extern' ( prototype | 'const' type IDENT ('[' N ']')* ';' )   (main-spec §7.2.1)
 //   typedef   :=  'typedef' type '*'* IDENT ';'          (main-spec §4.5)
 //   enumdecl  :=  'enum' IDENT? '{' IDENT ('=' INTLIT)? (',' IDENT ('=' INTLIT)?)* ','? '}' ';'
 //                 (also as the `type` of a typedef; `enum IDENT` names a defined one)

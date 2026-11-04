@@ -1541,8 +1541,12 @@ struct Parser {
             Loc at = peek().loc;
             Type base = parseCType();
             int stars = parseStars();
-            Token name = expectName("a parameter name");
-            checkName(name);
+            Token name;  // a prototype may leave it out (`int f(int);`); a definition may not (checked by the caller)
+            name.loc = peek().loc;
+            if (!isPunct(",") && !isPunct(")") && !isPunct("[")) {
+                name = expectName("a parameter name");
+                checkName(name);
+            }
             if (base.kind == Type::Kind::Unit && stars == 0)
                 fail(file, at, "a parameter of type `void`", "`void` has no values.", "use a real type.");
             size_t brackets = 0;
@@ -1766,6 +1770,13 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             p.failHere("expected a declaration, found " + describe(p.peek()), kSliceWhy,
                        "files contain functions; see spec/impl-spec.md.");
         int defLine = p.peek().loc.line;
+        const bool isExtern = p.isIdent("extern");  // main-spec §7.2.1: Lean already defines it
+        if (isExtern) {
+            if (hasAttr)
+                fail(fileName, attrLoc, "an attribute on an `extern` declaration",
+                     "nothing is emitted for it, so the attribute would be silently lost.", "remove it.");
+            ++p.i;
+        }
         Loc retAt = p.peek().loc;
         const size_t typeStart = p.i;
         Type retType = p.parseCType();
@@ -1775,6 +1786,32 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         if (!p.isPunct("(")) {  // a file-scope variable: a `const` one is a `def` (main-spec §7.3)
             bool isConst = false;
             for (size_t k = typeStart; k < p.i; ++k) isConst = isConst || p.toks[k].text == "const";
+            if (isExtern) {  // `extern const T name;`: a value defined in Lean
+                if (!isConst)
+                    failCode("E106", fileName, name.loc, "`" + name.text + "` is a mutable `extern` variable",
+                             "a Lean definition is a constant.", "declare it `extern const`.");
+                p.i = typeStart;
+                Type t = p.parseCType();
+                std::vector<long long> dims;
+                const int st = p.parseStars();
+                p.expectName("the name of the `extern` constant");
+                while (p.isPunct("[")) dims.push_back(p.parseArraySize());
+                t = p.declare(t, st, dims.size(), retAt, false);
+                if (p.isPunct("="))
+                    p.failHere("an `extern` declaration with a value",
+                               "`extern` means the value is defined in Lean (main-spec §7.2.1).",
+                               "drop `extern` to define it here, or drop the value.");
+                p.expectPunct(";", "after the `extern` declaration");
+                Function g;
+                g.name = name.text;
+                g.defLine = defLine;
+                g.isGlobal = true;
+                g.isExtern = true;
+                g.retType = t;
+                pending.clear();
+                unit.functions.push_back(std::move(g));
+                continue;
+            }
             if (hasAttr)
                 fail(fileName, attrLoc, "an attribute on the global `" + name.text + "`",
                      "the `lean::` attributes apply to functions.", "remove it.");
@@ -1805,6 +1842,24 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         p.expectPunct("(", "to open the parameter list of `" + name.text + "`");
         auto params = p.parseParams(name.text == "main");
         p.expectPunct(")", "to close the parameter list of `" + name.text + "`");
+        if (!p.isPunct(";"))
+            for (const auto& prm : params)
+                if (prm.second.empty())
+                    p.failHere("a parameter of `" + name.text + "` has no name",
+                               "only a prototype may leave parameter names out; the body needs them.",
+                               "name every parameter.");
+        if (p.isPunct(";") && isExtern) {  // `extern T f(…);` — defined in Lean (§7.2.1)
+            ++p.i;
+            Function f;
+            f.name = name.text;
+            f.defLine = defLine;
+            f.isExtern = true;
+            f.retType = retType;
+            f.params = std::move(params);
+            pending.clear();
+            unit.functions.push_back(std::move(f));
+            continue;
+        }
         if (p.isPunct(";")) {  // prototype: dropped (§7.1)
             if (hasAttr)
                 fail(fileName, attrLoc, "an attribute on the prototype of `" + name.text + "`",

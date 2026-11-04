@@ -28,7 +28,7 @@ const std::set<std::string> kSupported = {
 // C type and storage words that exist in the main spec but are not built
 // yet: a pointed refusal beats "expected a declaration".
 const std::set<std::string> kRefused = {
-    "union", "static", "extern",
+    "union", "static",
     "inline", "volatile", "register", "_Atomic",
     "__int128", "int128_t", "uint128_t", "_Float16",
 };

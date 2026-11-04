@@ -233,6 +233,8 @@ struct Function {
                                        // `main (args : List String)` plus two lets (check.cpp prepareMain)
     bool isIO = false;                  // prints, or calls something that does; `main` always (check.cpp)
                                        // → `: IO T := do` (main-spec §3.3)
+    bool isExtern = false;              // `extern T f(…);` / `extern const T x;`: Lean defines it (main-spec
+                                       // §7.2.1); no body, nothing emitted but an optional `example`
     bool isGlobal = false;              // a file-scope `const T name = …;` (main-spec §7.3): no parameters, the
                                        // body is that one Decl, emitted `def name : T := …`
     bool recursive = false;             // reaches itself through calls (toposort.cpp)

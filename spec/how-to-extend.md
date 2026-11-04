@@ -224,6 +224,7 @@ silently, never guess (D5).
     release/clean foo.c             # → foo.lean
     release/clean foo.c -o bar.lean
     release/clean foo.c --lint=c-semantics   # also print the W-lints
+    release/clean foo.c --check-externs      # also state each extern's type as an `example`
 
 - `test/cases/` — must translate; output is diffed against
   `<name>.expected.lean`; `<name>.checks.lean` is appended and the whole

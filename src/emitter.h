@@ -12,4 +12,6 @@
 
 #include "ast.h"
 
-std::string emit(const TranslationUnit& unit);
+// `checkExterns` (--check-externs): print `example : T → R := f` for every value-level
+// `extern`, so Lean confirms the C declaration matches the Lean definition (main-spec §7.2.1).
+std::string emit(const TranslationUnit& unit, bool checkExterns = false);

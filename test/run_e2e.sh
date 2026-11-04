@@ -4,7 +4,9 @@
 # For every test/cases/*.c:
 #   1. translate it with release/clean;
 #   2. diff the output against test/cases/<name>.expected.lean (golden file);
+#      (<name>.flags, if present, holds extra command-line flags)
 #   3. append test/cases/<name>.checks.lean (Lean `example`s) and type-check
+#      (<name>.before.lean, if present, goes in front: the Lean side of `extern`s)
 #      the combined file with `lean` — skipped, with a notice, if absent;
 #   4. if test/cases/<name>.expected.out exists, RUN the translation
 #      (`lean --run`) and compare it with what the C program itself printed:
@@ -51,7 +53,10 @@ for src in "$cases"/*.c; do
     [ -f "$src" ] || continue
     name="$(basename "$src" .c)"
 
-    if ! "$bin" "$src" -o "$tmp/$name.lean" > "$tmp/$name.log" 2>&1; then
+    flags=""
+    [ -f "$cases/$name.flags" ] && flags="$(cat "$cases/$name.flags")"
+    # shellcheck disable=SC2086
+    if ! "$bin" "$src" -o "$tmp/$name.lean" $flags > "$tmp/$name.log" 2>&1; then
         echo "FAIL $name: translator exited with an error"
         sed 's/^/    /' "$tmp/$name.log"
         fail=$((fail + 1))
@@ -69,7 +74,9 @@ for src in "$cases"/*.c; do
         continue
     fi
     if [ "$have_lean" = 1 ] && [ -f "$cases/$name.checks.lean" ]; then
-        cat "$tmp/$name.lean" "$cases/$name.checks.lean" > "$tmp/$name.checked.lean"
+        before=/dev/null  # Lean definitions of the file's `extern`s (main-spec §7.2.1), if any
+        [ -f "$cases/$name.before.lean" ] && before="$cases/$name.before.lean"
+        cat "$before" "$tmp/$name.lean" "$cases/$name.checks.lean" > "$tmp/$name.checked.lean"
         if ! (cd "$tmp" && lean "$tmp/$name.checked.lean") > "$tmp/$name.leancheck.log" 2>&1; then
             echo "FAIL $name: generated Lean does not type-check"
             sed 's/^/    /' "$tmp/$name.leancheck.log"

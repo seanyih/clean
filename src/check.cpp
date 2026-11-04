@@ -420,6 +420,7 @@ bool callsAny(const Expr& e, const std::set<std::string>& names) {
 void findIO(TranslationUnit& unit) {
     std::set<std::string> io = {"getchar", "fgetc", "getc", "fopen"};  // library calls that touch a stream
     for (Function& f : unit.functions) {
+        if (f.isExtern) continue;  // a value-level extern is pure (main-spec §7.2.1)
         f.isIO = f.name == "main" || hasPrint(f.body);
         if (f.isIO) io.insert(f.name);
     }
@@ -427,7 +428,7 @@ void findIO(TranslationUnit& unit) {
     while (changed) {
         changed = false;
         for (Function& f : unit.functions) {
-            if (f.isIO) continue;
+            if (f.isIO || f.isExtern) continue;
             bool calls = false;
             forEachExpr(f.body, [&](const Expr& e) { calls = calls || callsAny(e, io); });
             if (calls) {
@@ -1651,6 +1652,9 @@ void check(TranslationUnit& unit) {
     findIO(unit);       // which functions are `IO`
     std::map<std::string, Sig> sigs;
     for (const Function& f : unit.functions) {
+        if (f.isExtern && f.name == "main")
+            fail(unit.fileName, Loc{f.defLine, 1}, "`extern main`", "`main` is the program; it is defined here.",
+                 "drop `extern`.");
         if (sigs.count(f.name))
             fail(unit.fileName, Loc{f.defLine, 1}, "function `" + f.name + "` is defined twice",
                  "Lean allows only one definition per name.", "rename one of them.");
@@ -1665,8 +1669,21 @@ void check(TranslationUnit& unit) {
     std::map<std::string, int> writers;  // name → its written array parameter's index
     for (const Function& f : unit.functions)
         if (f.writerParam >= 0) writers[f.name] = f.writerParam;
-    for (Function& f : unit.functions)
+    for (Function& f : unit.functions) {
+        if (f.isExtern) {  // defined in Lean: only its signature matters (main-spec §7.2.1)
+            if (f.retType.kind == Type::Kind::Unit)
+                fail(unit.fileName, Loc{f.defLine, 1}, "`extern void " + f.name + "(…)`",
+                     "a value-level `extern` is a pure Lean function, and a pure function returning "
+                     "`Unit` does nothing.",
+                     "give it a return type, or define it in C.");
+            for (const auto& p : f.params)
+                if (p.first.kind == Type::Kind::File)
+                    fail(unit.fileName, Loc{f.defLine, 1}, "`extern " + f.name + "` takes a `FILE *`",
+                         "a value-level `extern` is pure; streams need `IO`.", "define it in C.");
+            continue;
+        }
         Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, structs, {}, {}}.run();
+    }
 
     // File-scope `printf` etc. (main-spec §8.2): checked like the body of a `void` function with
     // no parameters, so names, types and arities get the same treatment.

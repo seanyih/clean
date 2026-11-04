@@ -1,6 +1,6 @@
 // main.cpp — command line entry: wire the layers together.
 //
-// Layer: driver (lex → parse [format] → check → [lint] → sort → emit). Input: `clean <input.c> [-o <output.lean>] [--lint=c-semantics]` (argv).
+// Layer: driver (lex → parse [format] → check → [lint] → sort → emit). Input: `clean <input.c> [-o <output.lean>] [--lint=c-semantics] [--check-externs]` (argv).
 // Output: one .lean file (default: the input path with `.c` → `.lean`), a
 // one-line summary on stdout; diagnostics go to stderr with exit 1 (see
 // diag.h), usage errors exit 2.
@@ -23,7 +23,7 @@
 namespace {
 
 void usage(const char* prog) {
-    std::cerr << "usage: " << prog << " <input.c> [-o <output.lean>] [--lint=c-semantics]\n";
+    std::cerr << "usage: " << prog << " <input.c> [-o <output.lean>] [--lint=c-semantics] [--check-externs]\n";
 }
 
 std::string baseName(const std::string& path) {
@@ -64,10 +64,13 @@ void writeFile(const std::string& path, const std::string& content) {
 int main(int argc, char** argv) {
     std::string in, out;
     bool lintCSemantics = false;  // --lint=c-semantics: report where C would behave differently (W001–W014)
+    bool checkExterns = false;    // --check-externs: an `example` per extern declaration (main-spec §7.2.1)
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--lint=c-semantics") {
             lintCSemantics = true;
+        } else if (arg == "--check-externs") {
+            checkExterns = true;
         } else if (arg.rfind("--lint", 0) == 0) {
             std::cerr << "clean: unknown option '" << arg << "' (the only lint set is --lint=c-semantics)\n";
             return 2;
@@ -101,7 +104,7 @@ int main(int argc, char** argv) {
         check(unit);
         if (lintCSemantics) lint(unit);  // before sorting: "first place" means first in the C file
         sortDefinitions(unit);
-        writeFile(out, emit(unit));
+        writeFile(out, emit(unit, checkExterns));
         std::cout << "clean: wrote " << out << " (" << unit.functions.size()
                   << " definition(s))\n";
         // Hints (H…) always, lints (W…) when asked; they never change the exit code.

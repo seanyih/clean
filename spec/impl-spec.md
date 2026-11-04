@@ -161,6 +161,18 @@ Refused: a global without `const` (**E106** — Lean definitions never change;
 `StateM`/`IO.Ref` are 🟡), a `const` without a value, assigning to a
 constant, calling one, an initialiser that does I/O.
 
+**`extern`** (main-spec §7.2.1, value-level). `extern T f(A, B);` and
+`extern const T x;` mean *Lean already defines it*: nothing is emitted but the
+`-- c:` line, and calls use the Lean definition as is (a pure function —
+never `IO`, never a D20 writer). `--check-externs` adds `example : A → B → T
+:= f` (`example : T := x`), so Lean confirms that the C declaration matches the
+Lean definition. Prototype parameters may be unnamed (`int f(int);`); a
+definition's may not. Refused: `extern void` (a pure `Unit` function does
+nothing), a `FILE *` parameter, a non-`const` extern variable (E106), an
+initialised `extern`, `extern main`. The `HW` extern of §7.2.2 needs Sparkle
+(not built). Test cases put the Lean side in `NAME.before.lean` and extra
+flags in `NAME.flags` (run_e2e.sh).
+
 **Mixed types (D19).** When two operands differ, the conversion of main-spec
 §5.3 is inserted for the one of lower rank, so the output always shows it:
 `Nat < Int < intN_t/uintN_t < bv(N) < Float32 < Float`. Two fixed widths: the
@@ -433,7 +445,7 @@ cannot (see `cases-lean-rejects`).
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
 `goto` and labels (**E102** — permanent, main-spec §6),
-unions, compound literals (`(struct P){1, 2}`), `static`/`extern`/`inline`, the §5.4 bit-vector helpers
+unions, compound literals (`(struct P){1, 2}`), `static`/`inline`, the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
@@ -520,13 +532,15 @@ order, and become a `mutual` block. Every definition keeps its
     release/clean foo.c              # → foo.lean
     release/clean foo.c -o bar.lean
     release/clean foo.c --lint=c-semantics    # + W-lints on stderr (hints H… are always on stderr)
+    release/clean foo.c --check-externs       # + `example : A → R := f` per `extern` (main-spec §7.2.1)
 
 The suite (`test/run_e2e.sh`, `make test`):
 
-1. translate each `test/cases/*.c`;
+1. translate each `test/cases/*.c` (with the flags in `NAME.flags`, if any);
 2. diff against its `.expected.lean` golden file;
-3. append its `.checks.lean` (Lean `example`s / `#guard`s) and type-check the
-   whole thing with `lean`. A wrong translation cannot pass;
+3. append its `.checks.lean` (Lean `example`s / `#guard`s) and type-check
+   the whole thing with `lean` (`NAME.before.lean`, if present, goes in front:
+   the Lean definitions of the file's `extern`s). A wrong translation cannot pass;
 4. each `test/cases-should-fail/*.c` must exit 1 with a diagnostic;
 5. each `test/cases-lean-rejects/*.c` must translate fine **and** be rejected
    by `lean` (code whose legality only Lean can judge: unproven termination);
