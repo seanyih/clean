@@ -37,13 +37,15 @@
 //   Not      one kid                                      } a test is expected
 //   Cond     `c ? a : b`: kids [test, then, else] → `if c then a else b` (main-spec §5.1)
 //   Member   `p.x`: kids [the struct value], text = the field (main-spec §4.5)
+//   Raw      `LEAN_EXPR("…")`: text = the Lean, verbatim; its type is the one expected where it
+//            stands (an initialiser, argument, `return`, or a cast `(T)LEAN_EXPR(…)`) (main-spec §11.1)
 // In an `if` test, Cmp/And/Or/Not are Lean `Prop`s; where a `bool` is expected
 // they are `Bool` values (`decide (a < b)`, `&&`); check.cpp decides which.
 // Anywhere else they are refused.
 struct Expr {
     enum class Kind {
         IntLit, FloatLit, CharLit, StringLit, BoolLit, BvLit, Ident, Index, ArrayLit,
-        UnaryNeg, BitNot, Cast, Binary, Call, Cmp, And, Or, Not, Cond, Member
+        UnaryNeg, BitNot, Cast, Binary, Call, Cmp, And, Or, Not, Cond, Member, Raw
     };
     Kind kind = Kind::IntLit;
     std::string text;
@@ -130,10 +132,11 @@ struct Case {
 //   Close   `fclose(f);`            stream
 //   Exit    `exit(code);`           expr = the status; the statement never returns, so
 //                                   check.cpp counts it as ending its block like `return`
+//   Raw     `LEAN_STMT("…");`       name = the Lean, verbatim (lines kept): passed through (§11.1)
 struct Stmt {
     enum class Kind {
         Decl, Assign, CallStmt, If, Return, Switch, Block, Break, Continue, While, DoWhile,
-        For, Print, Exit, Scan, ReadLine, Close
+        For, Print, Exit, Scan, ReadLine, Close, Raw
     };
     Kind kind = Kind::Return;
     std::string name;
@@ -191,7 +194,7 @@ void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
         const bool noExpr = s.kind == Stmt::Kind::Block || s.kind == Stmt::Kind::Break ||
                             s.kind == Stmt::Kind::Continue || s.kind == Stmt::Kind::Print ||
                             s.kind == Stmt::Kind::Scan || s.kind == Stmt::Kind::ReadLine ||
-                            s.kind == Stmt::Kind::Close ||
+                            s.kind == Stmt::Kind::Close || s.kind == Stmt::Kind::Raw ||
                             (s.kind == Stmt::Kind::Decl && s.noInit) ||
                             (s.kind == Stmt::Kind::Return && s.noValue);
         if (!noExpr) f(s.expr);
@@ -284,5 +287,7 @@ struct TranslationUnit {
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build
     std::vector<Comment> trailingComments;  // comments after the last definition
     std::vector<Stmt> scripts;          // file-scope `printf` etc. (§8.2), source order; emitted as `#eval` after the functions
+    std::vector<std::string> leanDeclsBefore;  // `LEAN_DECL("…")` above every function: after the types, before them
+    std::vector<std::string> leanDeclsAfter;   // `LEAN_DECL("…")` below a function: at the end (main-spec §11.1)
     std::set<std::string> helpers;      // generated Lean helpers the file needs, e.g. "hexOf" (check.cpp; prelude.h)
 };

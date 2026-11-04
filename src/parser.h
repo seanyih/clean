@@ -6,6 +6,7 @@
 // printf is cut up by format.h. Grammar:
 //
 //   file      :=  ( comment | ';' | typedef | enumdecl | structdecl | global | prototype | function | print )*  EOF
+//   leandecl  :=  'LEAN_DECL' '(' STRINGLIT ')' ';'?   (raw Lean; above every function: before them, else at the end)
 //   global    :=  a local declaration whose type words include `const` (main-spec §7.3; else E106)
 //   extern    :=  'extern' ( prototype | 'const' type IDENT ('[' N ']')* ';' )   (main-spec §7.2.1)
 //   typedef   :=  'typedef' type '*'* IDENT ';'          (main-spec §4.5)
@@ -30,6 +31,7 @@
 //              |  'do' body 'while' '(' expr ')' ';'
 //              |  'for' '(' init? ';' expr? ';' step? ')' body     (main-spec §6.1)
 //              |  print
+//              |  'LEAN_STMT' '(' STRINGLIT ')' ';'                (main-spec §11.1: raw Lean)
 //              |  'return' expr ';'  |  'break' ';'  |  'continue' ';'
 //              |  block  |  ';'
 //   init      :=  a local declaration, an assignment or a call (no comma lists:
@@ -45,7 +47,7 @@
 //                 unary - ! ~  and the cast '(' type ')' unary
 //   postfix   :=  primary ( '[' expr ']' | '.' IDENT )*      (`->` is E101)
 //   primary   :=  INTLIT | FLOATLIT | CHARLIT | true | false | IDENT | IDENT '(' args ')'
-//              |  'BV' '(' width ',' INTLIT ')'  | '(' expr ')'
+//              |  'BV' '(' width ',' INTLIT ')'  | '(' expr ')'  | 'LEAN_EXPR' '(' STRINGLIT ')'
 //
 // Comments are not part of the grammar: `parse` lifts them out of the token
 // stream first, so they can sit anywhere C allows one and never affect what

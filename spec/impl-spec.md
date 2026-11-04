@@ -154,6 +154,22 @@ stand for their values. Refused: an `enum` defined inside a function, used
 before its definition, defined twice, empty, or with a global variable after
 it (E106); two enumerators of one name; an enumerator named like a function.
 
+**Raw Lean** (main-spec §11.1, the escape hatch). The argument is a string
+literal of Lean source, passed through as written (C escapes undone: `\n`
+starts a new line, `\"` is a quote). It is not read by clean, so Lean is its
+only judge.
+
+| C                         | Lean                                                     |
+| ------------------------- | -------------------------------------------------------- |
+| `LEAN_DECL("…");`         | the text at file scope: after the types and before the functions when it sits above every function, else at the end of the file (where it may state theorems about them) |
+| `LEAN_STMT("…");`         | the text as do-block line(s), at the statement's indentation |
+| `LEAN_EXPR("…")`          | `(…)`, with the type expected where it stands — an initialiser, an argument, a `return`, or a cast `(T)LEAN_EXPR("…")` |
+
+A C function calls a `LEAN_DECL` definition through an `extern` prototype. A
+`LEAN_EXPR` where no type is expected (`LEAN_EXPR("x") + 1`, a test) is refused:
+cast it. What a `LEAN_STMT` does is invisible to clean — it does not make the
+function `IO`, and the variables it assigns are not made `let mut`.
+
 **Global constants** (main-spec §7.3). A file-scope variable whose type
 words include `const` is a `def`: `const int N = 8;` → `def N : Int := 8`,
 `const uint8_t T[4] = {…};` → `def T : Array UInt8 := #[…]`, likewise strings

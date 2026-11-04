@@ -626,6 +626,11 @@ struct Checker {
 
     Type valueType(Expr& e) {
         switch (e.kind) {
+        case Expr::Kind::Raw:  // `LEAN_EXPR("…")` has no C type of its own: only `valueAs` / a cast give it one
+            fail(file, e.loc, "`LEAN_EXPR(…)` is used where clean cannot tell its type",
+                 "the Lean text is passed through unread, so its type has to come from where it stands.",
+                 "store it first (`int x = LEAN_EXPR(\"…\");`), pass it as an argument, return it, or cast it: "
+                 "`(int)LEAN_EXPR(\"…\")`.");
         case Expr::Kind::Member: {  // `p.x` (main-spec §4.5)
             Type st = value(e.kids[0]);
             return fieldOf(st, e.text, e.loc).type;
@@ -684,6 +689,10 @@ struct Checker {
         }
         case Expr::Kind::Cast: {
             Expr& kid = e.kids[0];
+            if (kid.kind == Expr::Kind::Raw) {  // `(T)LEAN_EXPR("…")`: the cast names its type
+                kid.type = e.type;
+                return e.type;
+            }
             Type from = isTestOp(kid) ? Type::of(Type::Kind::Bool) : value(kid);
             if (isTestOp(kid)) valueAs(kid, from);
             std::string why, fix;
@@ -986,6 +995,10 @@ struct Checker {
     // `e` must end up with type `target`: as is, via an implicit conversion
     // (number → bool, literal → char), or refused.
     void valueAs(Expr& e, Type target) {
+        if (e.kind == Expr::Kind::Raw) {  // `LEAN_EXPR("…")` takes the type expected here (§11.1)
+            e.type = target;
+            return;
+        }
         if (isTestOp(e)) {
             if (target.kind != Type::Kind::Bool) value(e);  // throws the "used as a number" refusal
             boolValue(e);
@@ -1721,6 +1734,8 @@ struct Checker {
                 break;
             case Stmt::Kind::Close:
                 valueAs(s.stream, Type::of(Type::Kind::File));
+                break;
+            case Stmt::Kind::Raw:  // `LEAN_STMT("…")`: Lean's to judge (main-spec §11.1)
                 break;
             case Stmt::Kind::Exit:  // Lean's `IO.Process.exit` takes a `UInt8`: C's "status mod 256"
                 valueAs(s.expr, Type::of(Type::Kind::UInt, 8));

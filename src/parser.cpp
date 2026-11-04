@@ -571,6 +571,30 @@ struct Parser {
         return e;
     }
 
+    // `LEAN_DECL("…")`, `LEAN_STMT("…")`, `LEAN_EXPR("…")` (main-spec §11.1): the argument is a string
+    // literal (adjacent ones join) holding Lean source, which is passed through as written.
+    std::string parseRawLean(const std::string& macro) {
+        ++i;  // the macro name
+        expectPunct("(", "after `" + macro + "`");
+        if (peek().kind != Token::Kind::StringLit)
+            failHere("`" + macro + "` takes a string literal", "its argument is Lean source, passed through as written.",
+                     "write `" + macro + "(\"…\")`.");
+        std::string text;
+        while (peek().kind == Token::Kind::StringLit) {
+            const std::string& lit = toks[i++].text;  // Lean spelling, quotes included: undo the escapes
+            for (size_t k = 1; k + 1 < lit.size(); ++k) {
+                if (lit[k] != '\\' || k + 2 >= lit.size()) {
+                    text += lit[k];
+                    continue;
+                }
+                const char n = lit[++k];
+                text += n == 'n' ? '\n' : n == 't' ? '\t' : n;
+            }
+        }
+        expectPunct(")", "to close `" + macro + "`");
+        return text;
+    }
+
     // `BV(8, 0x63)` → the literal `0x63#8` (main-spec §5.4).
     Expr parseBvLiteral() {
         Loc at = peek().loc;
@@ -631,6 +655,14 @@ struct Parser {
         if (t.kind == Token::Kind::Ident && t.text == "BV" && peek2().kind == Token::Kind::Punct &&
             peek2().text == "(")
             return parseBvLiteral();
+        if (t.kind == Token::Kind::Ident && t.text == "LEAN_EXPR" && peek2().kind == Token::Kind::Punct &&
+            peek2().text == "(") {
+            Expr e;
+            e.kind = Expr::Kind::Raw;
+            e.loc = t.loc;
+            e.text = parseRawLean("LEAN_EXPR");
+            return e;
+        }
         if (t.kind == Token::Kind::Ident && isLibraryConstant(t.text)) {  // EXIT_FAILURE, EOF, …
             ++i;
             const std::string v = libraryConstant(t.text);
@@ -1436,6 +1468,12 @@ struct Parser {
             s.kind = Stmt::Kind::Continue;
             return s;
         }
+        if (w == "LEAN_STMT" && peek2().kind == Token::Kind::Punct && peek2().text == "(") {
+            s.kind = Stmt::Kind::Raw;
+            s.name = parseRawLean("LEAN_STMT");
+            expectPunct(";", "after `LEAN_STMT(…)`");
+            return s;
+        }
         if (w == "goto")
             failCode("E102", file, peek().loc, "`goto` is not translated",
                      "main-spec §6 keeps `goto` and labels ⛔; Lean has nothing they could map to.",
@@ -1763,6 +1801,15 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             pending.clear();
             for (Comment& c : p.takeComments(p.i, false)) st.comments.push_back(std::move(c));
             unit.scripts.push_back(std::move(st));
+            continue;
+        }
+        if (p.isIdent("LEAN_DECL") && p.isPunctAt(p.i + 1, "(")) {  // raw Lean at file scope (§11.1)
+            std::string text = p.parseRawLean("LEAN_DECL");
+            if (p.isPunct(";")) ++p.i;
+            std::string out;
+            for (const Comment& c : pending) out += (c.block ? "/- " + c.text + " -/" : "-- " + c.text) + "\n";
+            pending.clear();
+            (unit.functions.empty() ? unit.leanDeclsBefore : unit.leanDeclsAfter).push_back(out + text);
             continue;
         }
         if (p.isIdent("typedef")) {  // main-spec §4.5

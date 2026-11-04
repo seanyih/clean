@@ -102,6 +102,7 @@ int level(const Expr& e) {
     case Expr::Kind::Cast:   return 90;
     case Expr::Kind::Cond:   return 10;   // `if … then … else …` swallows everything to its right
     case Expr::Kind::Member: return 100;  // `p.x`, `(f a).x`
+    case Expr::Kind::Raw:    return 100;  // `(…)`, always parenthesised
     default:                 return 100;
     }
 }
@@ -310,6 +311,9 @@ void emitExpr(const Expr& e, std::string& out) {
     case Expr::Kind::Not:
         out += "!";
         emitAtom(e.kids[0], out);
+        return;
+    case Expr::Kind::Raw:  // `LEAN_EXPR("…")`, verbatim (main-spec §11.1)
+        out += "(" + e.text + ")";
         return;
     case Expr::Kind::Member:  // `p.x` (main-spec §4.5)
         emitAtom(e.kids[0], out);
@@ -886,6 +890,16 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
             emitStmts(s.body, inner, wret, false, out, &s.bodyTrailing);
             break;
         }
+        case Stmt::Kind::Raw: {  // `LEAN_STMT("…")`, verbatim, every line at this indentation (main-spec §11.1)
+            size_t start = 0;
+            while (start <= s.name.size()) {
+                const size_t nl = s.name.find('\n', start);
+                out += pad(level) + s.name.substr(start, nl == std::string::npos ? std::string::npos : nl - start) + "\n";
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
+            break;
+        }
         case Stmt::Kind::Break:
             out += pad(level) + "break\n";  // ends the innermost loop (the parser checked)
             break;
@@ -1059,6 +1073,8 @@ std::string emit(const TranslationUnit& unit, bool checkExterns) {
         }
     }
 
+    for (const std::string& raw : unit.leanDeclsBefore) out += "\n" + raw + "\n";  // LEAN_DECL (§11.1)
+
     size_t i = 0;
     while (i < unit.functions.size()) {
         const Function& f = unit.functions[i];
@@ -1081,6 +1097,7 @@ std::string emit(const TranslationUnit& unit, bool checkExterns) {
         out += "\n";
         emitScript(st, out);
     }
+    for (const std::string& raw : unit.leanDeclsAfter) out += "\n" + raw + "\n";  // LEAN_DECL below a function
     if (!unit.trailingComments.empty()) {
         out += "\n";
         emitComments(unit.trailingComments, "", out);
