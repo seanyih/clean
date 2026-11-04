@@ -664,11 +664,23 @@ struct Parser {
                 e.kind = Expr::Kind::Call;
                 e.text = t.text;
                 e.loc = t.loc;
+                auto argument = [&]() {  // a width / bit position of a §5.4 helper may be a `#define`d number
+                    if (bitVecConstArg(t.text, e.kids.size()) && peek().kind == Token::Kind::Ident &&
+                        macroValues.count(peek().text)) {
+                        Expr n;
+                        n.kind = Expr::Kind::IntLit;
+                        n.text = macroValues.at(peek().text);
+                        n.loc = peek().loc;
+                        ++i;
+                        return n;
+                    }
+                    return parseExpr();
+                };
                 if (!isPunct(")")) {
-                    e.kids.push_back(parseExpr());
+                    e.kids.push_back(argument());
                     while (isPunct(",")) {
                         ++i;
-                        e.kids.push_back(parseExpr());
+                        e.kids.push_back(argument());
                     }
                 }
                 expectPunct(")", "to close the argument list of `" + t.text + "`");
@@ -1443,6 +1455,7 @@ struct Parser {
             case LibName::ReadLine: return parseReadLine();
             case LibName::Close:    return parseClose();
             case LibName::Value:    break;  // `getchar();` — an expression statement, check.cpp judges it
+            case LibName::BitVec:   break;
             case LibName::None:     break;
             }
         }

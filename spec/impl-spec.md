@@ -195,6 +195,27 @@ Operators are checked per type: bitwise on `int` is **E303**, on `char`
 **H004**, `%` on floats, `-` on unsigned types and `~` on `unsigned` are
 refused with a fix.
 
+**Bit-vector helpers** (main-spec §5.4). `bv(N)` is signless, so the
+signed readings and the width changes have names; each is pure and takes
+`bv(N)` operands (a literal adapts in the two-operand ones):
+
+| C                                   | Lean                               | Type            |
+| ----------------------------------- | ---------------------------------- | --------------- |
+| `bv_cat(a, b)`                      | `a ++ b`                           | `bv(M+N)`       |
+| `bv_ext(x, hi, lo)`                 | `x.extractLsb' lo (hi-lo+1)`       | `bv(hi-lo+1)`   |
+| `bv_zext(N, x)`, `bv_sext(N, x)`    | `x.setWidth N`, `x.signExtend N`   | `bv(N)`         |
+| `bv_bit(x, i)`                      | `x.getLsbD i`                      | `bool`          |
+| `bv_rotl(x, k)`, `bv_rotr(x, k)`    | `x.rotateLeft k`, `x.rotateRight k`| `x`'s           |
+| `bv_sshr(x, k)`                     | `x.sshiftRight k`                  | `x`'s           |
+| `bv_slt` `bv_sle` `bv_ult` `bv_ule` | `a.slt b` …                        | `bool`          |
+| `bv_sdiv(a, b)`                     | `a.sdiv b`                         | `a`'s           |
+
+`hi`, `lo` and `N` are literals or `#define NAME <integer>` (E302 otherwise);
+`lo ≤ hi < width` (E301 otherwise). Counts and bit indices convert to `Nat`
+(D19). All names were checked on Lean 4.35.0 (main-spec Appendix B item 2:
+`setWidth`, `signExtend`, `getLsbD`, `rotateLeft`/`rotateRight`, `sdiv` exist).
+The names are reserved: a user function `bv_cat` is refused.
+
 **Tests.** `< <= > >= == != && || !` are allowed where a test is expected
 (an `if` condition, or inside another test) and become Lean propositions:
 `==` → `=`, `!=` → `≠`, `&&` → `∧`, `||` → `∨`, `!` → `¬`; on floats `==`
@@ -448,8 +469,7 @@ cannot (see `cases-lean-rejects`).
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
 `goto` and labels (**E102** — permanent, main-spec §6),
-unions, compound literals (`(struct P){1, 2}`), the §5.4 bit-vector helpers
-(`bv_cat` …), the `<string.h>` helpers, `switch` on types
+unions, compound literals (`(struct P){1, 2}`), the `<string.h>` helpers, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
 one is an error, not a silent wrong name), Sparkle, theorems.
@@ -664,7 +684,6 @@ missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
    before the loop and at its end); `atoi`/`strtol` (§12.2). (The
    uninitialised scalar local, `int n; scanf("%d", &n);`, is done: it starts
    at the type's zero, main-spec §4.5, lint W004.)
-3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
-   give E301 its fix — and the `<string.h>` helpers (§12.3).
+3. The `<string.h>` helpers (§12.3). (The §5.4 bit-vector helpers are done.)
 4. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and
    a tuple return for non-`void` writers / several written arrays.

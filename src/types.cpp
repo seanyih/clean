@@ -396,8 +396,8 @@ Unified unify(Type a, Type b, bool comparison) {
     if (a.kind == K::BitVec && b.kind == K::BitVec)
         return refuse("E301", "bit-width mismatch: `" + cName(a) + "` and `" + cName(b) + "` in one operation",
                       "a bit-vector operation needs equal widths; Lean rejects the rest.",
-                      "make the widths equal (the `bv_zext`/`bv_sext`/`bv_ext` helpers of main-spec §5.4 "
-                      "are not built yet).");
+                      "make the widths equal: `bv_zext(N, x)` / `bv_sext(N, x)` widen, `bv_ext(x, hi, lo)` "
+                      "cuts (main-spec §5.4).");
     if (ra == 3 && rb == 3) {  // two fixed widths: wider wins; same width: the unsigned one
         if (a.width != b.width) u.type = a.width > b.width ? a : b;
         else u.type = a.kind == K::UInt ? a : b;
@@ -670,9 +670,8 @@ std::string convert(Type from, Type to, const std::string& x, std::string* why, 
     case K::BitVec: {
         const std::string w = std::to_string(to.width);
         if (from.kind == K::BitVec)
-            return fail("a different width needs an explicit extension or truncation "
-                        "(E301); the §5.4 helpers are not built yet.",
-                        "keep both sides at one width.");
+            return fail("a different width needs an explicit extension or truncation (E301).",
+                        "widen with `bv_zext(N, x)` / `bv_sext(N, x)`, cut with `bv_ext(x, hi, lo)` (main-spec §5.4).");
         if (from.kind == K::Nat) return "BitVec.ofNat " + w + " " + x;
         if (from.kind == K::Int) return "BitVec.ofInt " + w + " " + x;
         if (from.kind == K::SInt) return "BitVec.ofInt " + w + " " + x + ".toInt";

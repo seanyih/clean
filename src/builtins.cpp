@@ -11,6 +11,10 @@ LibName classifyLibName(const std::string& name) {
     if (name == "fgets") return LibName::ReadLine;
     if (name == "fclose") return LibName::Close;
     if (name == "getchar" || name == "fgetc" || name == "getc" || name == "fopen") return LibName::Value;
+    if (name == "bv_cat" || name == "bv_ext" || name == "bv_bit" || name == "bv_zext" || name == "bv_sext" ||
+        name == "bv_rotl" || name == "bv_rotr" || name == "bv_slt" || name == "bv_sle" || name == "bv_ult" ||
+        name == "bv_ule" || name == "bv_sdiv" || name == "bv_sshr")
+        return LibName::BitVec;
     return LibName::None;
 }
 
@@ -32,6 +36,12 @@ bool libSignature(const std::string& name, LibSignature& out) {
         out = {{str, str}, file};
         return true;
     }
+    return false;
+}
+
+bool bitVecConstArg(const std::string& name, size_t k) {
+    if (name == "bv_zext" || name == "bv_sext") return k == 0;
+    if (name == "bv_ext") return k == 1 || k == 2;
     return false;
 }
 

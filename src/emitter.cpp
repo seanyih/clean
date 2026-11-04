@@ -42,6 +42,7 @@
 #include "emitter.h"
 
 #include <cstdlib>
+#include <map>
 #include <vector>
 
 #include "prelude.h"
@@ -92,7 +93,7 @@ int level(const Expr& e) {
     case Expr::Kind::Cmp:    return cmpIsBool(cmpType(e), e.text) ? 50 : 90;  // `a == b` / `decide (…)`
     case Expr::Kind::And:    return 35;
     case Expr::Kind::Or:     return 30;
-    case Expr::Kind::Call:   return e.io ? 100 : 90;  // `(← f x)` is an atom, an application is not
+    case Expr::Kind::Call:   return e.text == "bv_cat" ? 65 : e.io ? 100 : 90;  // `a ++ b`; `(← f x)` is an atom
     case Expr::Kind::Not:
     case Expr::Kind::Cast:   return 90;
     case Expr::Kind::Cond:   return 10;   // `if … then … else …` swallows everything to its right
@@ -103,6 +104,7 @@ int level(const Expr& e) {
 
 void emitExpr(const Expr& e, std::string& out);
 void emitCond(const Expr& e, std::string& out);
+void emitChild(const Expr& e, int parentLevel, bool right, std::string& out);
 std::string structLit(const Expr& lit, Type st);
 
 // The unit being emitted: struct definitions are looked up in it (zero values, initialisers).
@@ -146,7 +148,40 @@ void emitAtom(const Expr& e, std::string& out) {
     out += ')';
 }
 
+// The §5.4 helpers (main-spec): `bv_cat(a, b)` → `a ++ b`, the rest are methods of their
+// first operand — `bv_ext(x, hi, lo)` → `x.extractLsb' lo (hi - lo + 1)`, `bv_slt(a, b)` → `a.slt b`.
+bool emitBitVecHelper(const Expr& e, std::string& out) {
+    static const std::map<std::string, std::string> method = {
+        {"bv_bit", "getLsbD"}, {"bv_rotl", "rotateLeft"}, {"bv_rotr", "rotateRight"}, {"bv_slt", "slt"},
+        {"bv_sle", "sle"}, {"bv_ult", "ult"}, {"bv_ule", "ule"}, {"bv_sdiv", "sdiv"}, {"bv_sshr", "sshiftRight"}};
+    if (e.text == "bv_cat") {
+        emitChild(e.kids[0], 65, false, out);
+        out += " ++ ";
+        emitChild(e.kids[1], 65, true, out);
+        return true;
+    }
+    if (e.text == "bv_ext") {
+        emitAtom(e.kids[0], out);
+        const long long hi = std::strtoll(e.kids[1].text.c_str(), nullptr, 0);
+        const long long lo = std::strtoll(e.kids[2].text.c_str(), nullptr, 0);
+        out += ".extractLsb' " + std::to_string(lo) + " " + std::to_string(hi - lo + 1);
+        return true;
+    }
+    if (e.text == "bv_zext" || e.text == "bv_sext") {
+        emitAtom(e.kids[1], out);
+        out += std::string(e.text == "bv_zext" ? ".setWidth " : ".signExtend ") + std::to_string(e.type.width);
+        return true;
+    }
+    auto m = method.find(e.text);
+    if (m == method.end()) return false;
+    emitAtom(e.kids[0], out);
+    out += "." + m->second + " ";
+    emitAtom(e.kids[1], out);
+    return true;
+}
+
 void emitCall(const Expr& e, std::string& out) {
+    if (emitBitVecHelper(e, out)) return;
     out += e.text;
     for (const Expr& arg : e.kids) {
         out += ' ';

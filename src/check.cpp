@@ -721,6 +721,7 @@ struct Checker {
                 fail(file, e.loc, "variable `" + e.text + "` is called like a function",
                      "function values are not translated.",
                      "call a defined function, or drop the call.");
+            if (classifyLibName(e.text) == LibName::BitVec) return bitVecHelper(e);
             LibSignature lib;
             if (libSignature(e.text, lib)) {
                 if (lib.params.size() != e.kids.size())
@@ -798,6 +799,79 @@ struct Checker {
                  "use it as an `if` condition (`if (c) x = 1; else x = 0;`), or store it in a `bool`.");
         }
         return e.type;  // unreachable: every case above returns or throws
+    }
+
+    // ---- the bit-vector helpers (main-spec §5.4) ---------------------------------------
+
+    // A constant argument (a width, a bit position): a non-negative integer literal.
+    long long constArg(Expr& e, const std::string& fn, const std::string& what) {
+        if (e.kind != Expr::Kind::IntLit)
+            failDiag("E302", e.loc, "the " + what + " of `" + fn + "` is not a constant",
+                     "the result's width is part of its Lean type (`BitVec N`), so it is needed while translating.",
+                     "write a literal, or a `#define NAME <integer>`.");
+        e.type = Type::of(Type::Kind::Nat);
+        return labelValue(e);
+    }
+
+    // An argument that must be a bit-vector (its width is not guessed from a literal).
+    Type bvArg(Expr& e, const std::string& fn) {
+        Type t = value(e);
+        if (t.kind != Type::Kind::BitVec)
+            fail(file, e.loc, "`" + fn + "` takes a `bv(N)`, not a `" + cName(t) + "`",
+                 "the helpers of main-spec §5.4 work on bit-vectors.",
+                 isLiteral(t) ? "give the literal its width: `BV(8, …)`." : "cast it: `(bv(8))x`.");
+        return t;
+    }
+
+    Type bitVecHelper(Expr& e) {
+        static const std::map<std::string, size_t> arity = {
+            {"bv_cat", 2}, {"bv_ext", 3}, {"bv_bit", 2}, {"bv_zext", 2}, {"bv_sext", 2}, {"bv_rotl", 2},
+            {"bv_rotr", 2}, {"bv_slt", 2}, {"bv_sle", 2}, {"bv_ult", 2}, {"bv_ule", 2}, {"bv_sdiv", 2},
+            {"bv_sshr", 2}};
+        const std::string& fn = e.text;
+        if (e.kids.size() != arity.at(fn))
+            fail(file, e.loc, "`" + fn + "` takes " + std::to_string(arity.at(fn)) + " argument(s) but is called with " +
+                     std::to_string(e.kids.size()),
+                 "the arity is checked here so that Lean does not have to report it.", "see main-spec §5.4.");
+        const Type nat = Type::of(Type::Kind::Nat);
+        if (fn == "bv_cat") {  // widths add
+            const Type a = bvArg(e.kids[0], fn), b = bvArg(e.kids[1], fn);
+            return Type::of(Type::Kind::BitVec, a.width + b.width);
+        }
+        if (fn == "bv_ext") {  // bits hi..lo
+            const Type x = bvArg(e.kids[0], fn);
+            const long long hi = constArg(e.kids[1], fn, "high bit"), lo = constArg(e.kids[2], fn, "low bit");
+            if (lo > hi || hi >= x.width)
+                failDiag("E301", e.loc, "`bv_ext(x, " + std::to_string(hi) + ", " + std::to_string(lo) + ")` on a `" +
+                             cName(x) + "`",
+                         "the bits must satisfy lo ≤ hi < width.", "pick bits inside the value.");
+            return Type::of(Type::Kind::BitVec, (int)(hi - lo + 1));
+        }
+        if (fn == "bv_zext" || fn == "bv_sext") {  // to width N
+            const long long n = constArg(e.kids[0], fn, "width");
+            bvArg(e.kids[1], fn);
+            if (n < 1) failDiag("E302", e.kids[0].loc, "a width of 0", "a bit-vector needs at least one bit.", "write 1 or more.");
+            return Type::of(Type::Kind::BitVec, (int)n);
+        }
+        if (fn == "bv_bit") {
+            bvArg(e.kids[0], fn);
+            valueAs(e.kids[1], nat);
+            return Type::of(Type::Kind::Bool);
+        }
+        if (fn == "bv_rotl" || fn == "bv_rotr" || fn == "bv_sshr") {  // the count is a `Nat`
+            const Type x = bvArg(e.kids[0], fn);
+            valueAs(e.kids[1], nat);
+            return x;
+        }
+        // bv_slt bv_sle bv_ult bv_ule bv_sdiv: two operands of one width (a literal adapts)
+        Type a = value(e.kids[0]), b = value(e.kids[1]);
+        if (a.kind != Type::Kind::BitVec && b.kind != Type::Kind::BitVec) bvArg(e.kids[0], fn);
+        Unified u = unify(a, b);
+        if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
+        if (u.type.kind != Type::Kind::BitVec) bvArg(e.kids[0], fn);
+        coerce(e.kids[0], u.type);
+        coerce(e.kids[1], u.type);
+        return fn == "bv_sdiv" ? u.type : Type::of(Type::Kind::Bool);
     }
 
     // `a && f(x)` short-circuits in C; Lean's `(← f x)` is run before the `&&`, always.

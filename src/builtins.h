@@ -24,6 +24,8 @@ enum class LibName {
     ReadLine,  // fgets                                          → Stmt::Kind::ReadLine
     Close,     // fclose                                         → Stmt::Kind::Close
     Value,     // getchar fgetc getc fopen: calls that give a value → Expr::Kind::Call (`libSignature`)
+    BitVec,    // bv_cat bv_ext bv_bit bv_zext bv_sext bv_rotl bv_rotr bv_slt bv_sle bv_ult bv_ule bv_sdiv
+               // bv_sshr: the main-spec §5.4 helpers, pure; typed by check.cpp, spelled by emitter.cpp
 };
 
 LibName classifyLibName(const std::string& name);
@@ -40,6 +42,10 @@ struct LibSignature {
     Type ret;
 };
 bool libSignature(const std::string& name, LibSignature& out);
+
+// The argument positions of a §5.4 helper that must be constants known while translating
+// (a width or a bit position): `bv_zext(N, x)` → 0, `bv_ext(x, hi, lo)` → 1 and 2.
+bool bitVecConstArg(const std::string& name, size_t k);
 
 // Constants the C headers define as macros (`EXIT_FAILURE`, `EOF`, …). The tool
 // does not expand macros, so it knows these few by name; the parser turns each
