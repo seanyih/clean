@@ -113,14 +113,15 @@ update impl-spec.md (the types table) and error-codes.md.
 | Feature (main-spec)                  | Hook                                                                      |
 | ------------------------------------ | ------------------------------------------------------------------------- |
 | typedefs, structs, enums (§4.5)      | file-scope declarations in `TranslationUnit` + `toposort.cpp` ordering; a `Type::Kind` that carries a name (`Type` already has `args`; add a name field, update `operator==`) |
-| `?:`                                 | recipe 1's expression cousin: a new `Expr::Kind` and `valueType`/`emitExpr` cases |
 | `printf` / `IO` (§8)                 | purity inference (D7) in `emitFunction`; makes `void` functions observable |
 | `bv_*` helpers (§5.4)                | calls to known names in `check.cpp` `Call`; signatures in types.cpp       |
 | `<string.h>` helpers (§12.3)         | same: known names in `Call`, `String` arguments                           |
 | writer extensions (D20)              | `findWriters` in `check.cpp` (fixpoint + refusals), `Stmt::writeBack` and `wret` in `emitter.cpp` — a row write-back (`fill(m[1], n)`) or a tuple return slots in there |
 | `switch` on `uint8_t`/`bv`/`char`    | lift the guard in `check.cpp` `switchStmt` once Lean accepts the patterns |
 
-Done and worth reading as worked examples: arrays (`Type::arrayOf`,
+Done and worth reading as worked examples: `?:` (`Expr::Kind::Cond`:
+`parseTernary`, its `valueType` case, `emitExpr` + the `level` of 10 that
+parenthesises it), arrays (`Type::arrayOf`,
 `Expr::Kind::Index`/`ArrayLit`, `initList`, `declStmt` in check.cpp),
 strings (`StringLit`, `String` rows in `unify`/`convert`), `void`
 (`CallStmt`, `return;`), the `void` array writers (`findWriters` in

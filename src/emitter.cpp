@@ -95,11 +95,13 @@ int level(const Expr& e) {
     case Expr::Kind::Call:   return e.io ? 100 : 90;  // `(← f x)` is an atom, an application is not
     case Expr::Kind::Not:
     case Expr::Kind::Cast:   return 90;
+    case Expr::Kind::Cond:   return 10;   // `if … then … else …` swallows everything to its right
     default:                 return 100;
     }
 }
 
 void emitExpr(const Expr& e, std::string& out);
+void emitCond(const Expr& e, std::string& out);
 
 // `f a b` — the call itself, without the `(← …)` an I/O function needs inside an expression.
 void emitCall(const Expr& e, std::string& out);
@@ -213,6 +215,14 @@ void emitExpr(const Expr& e, std::string& out) {
         out += "!";
         emitAtom(e.kids[0], out);
         return;
+    case Expr::Kind::Cond:  // `c ? a : b` (main-spec §5.1); the test is a decidable `Prop`
+        out += "if ";
+        emitCond(e.kids[0], out);
+        out += " then ";
+        emitExpr(e.kids[1], out);
+        out += " else ";
+        emitExpr(e.kids[2], out);
+        return;
     }
 }
 
@@ -253,7 +263,8 @@ void emitCond(const Expr& e, std::string& out) {
         return;
     default: {  // a value used as a test: C's "non-zero is true" (types.cpp decides the spelling)
         std::string v;
-        emitExpr(e, v);
+        if (e.kind == Expr::Kind::Cond) emitAtom(e, v);  // `(if …) ≠ 0`: the test must not join the else branch
+        else emitExpr(e, v);
         out += truthTest(e.type, v);
     }
     }

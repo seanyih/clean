@@ -265,11 +265,29 @@ struct Parser {
     // ---- expressions ---------------------------------------------------
 
     Expr parseExpr() {
-        Expr e = parseBinary(1);
+        Expr e = parseTernary();
         if (isPunct("="))  // `if (x = 1)`, `return x = 2;`, `f(a = b)`
             failCode("E103", file, peek().loc, "assignment used as an expression",
                      "Lean has no assignment expressions; assignments are statements.",
                      "split it into a separate statement.");
+        return e;
+    }
+
+    // `c ? a : b` (main-spec §5.1): looser than `||`, right-associative, so
+    // `a ? b : c ? d : e` is `a ? b : (c ? d : e)` as in C.
+    Expr parseTernary() {
+        Expr c = parseBinary(1);
+        if (!isPunct("?")) return c;
+        Expr e;
+        e.kind = Expr::Kind::Cond;
+        e.loc = c.loc;
+        ++i;  // `?`
+        Expr a = parseExpr();
+        expectPunct(":", "between the branches of `?:`");
+        Expr b = parseTernary();
+        e.kids.push_back(std::move(c));
+        e.kids.push_back(std::move(a));
+        e.kids.push_back(std::move(b));
         return e;
     }
 

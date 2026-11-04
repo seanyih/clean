@@ -700,6 +700,29 @@ struct Checker {
             e.io = it->second.io;
             return it->second.ret;
         }
+        case Expr::Kind::Cond: {  // `c ? a : b` → `if c then a else b`: both branches meet at one type (D19)
+            cond(e.kids[0]);
+            Type result = Type::of(Type::Kind::Bool);
+            if (isTestOp(e.kids[1]) || isTestOp(e.kids[2])) {  // `c ? a < b : p`: a `bool` either way
+                valueAs(e.kids[1], result);
+                valueAs(e.kids[2], result);
+            } else {
+                Type a = value(e.kids[1]);
+                Type b = value(e.kids[2]);
+                Unified u = unify(a, b);  // equal types meet as they are (bool, char, string too)
+                if (!u.ok) failDiag(u.code, e.loc, u.problem, u.why, u.fix);
+                coerce(e.kids[1], u.type);
+                coerce(e.kids[2], u.type);
+                result = u.type;
+            }
+            for (int k = 1; k <= 2; ++k)
+                if (callsIO(e.kids[k]))
+                    fail(file, e.kids[k].loc, "an I/O call inside a branch of `?:`",
+                         "C runs only the branch it picks; Lean's `(← f x)` would run before the `if`, "
+                         "whichever branch is taken.",
+                         "use an `if`/`else` statement, or call it first and keep the result.");
+            return result;
+        }
         case Expr::Kind::Cmp:
         case Expr::Kind::And:
         case Expr::Kind::Or:

@@ -87,7 +87,12 @@ Lean, adjacent literals join); `true`/`false` are `Bool`; `BV(8, 0x63)` is
 ^^^ ~~~ <<< >>>`) follow C's parse tree. The output carries the parentheses
 *Lean's* precedence needs, which differs from C's for shifts and bitwise
 operators. `-x` → `(-x)`, `f(a, b)` → `f a b`, `(T)e` is a cast, `a[i]` is
-`a[i]!` (`s[i]` on a string is `s.toList[i]!`).
+`a[i]!` (`s[i]` on a string is `s.toList[i]!`). `c ? a : b` is
+`if c' then a else b` (main-spec §5.1): the test follows the rules of an `if`
+condition, the two branches meet at one type as for `a + b` (D19, a `bool`
+branch makes both `bool`), the chain is right-associative like C's, and the
+`if` is parenthesised wherever Lean would otherwise extend it. An I/O call in
+a branch is refused: C runs only the chosen branch, `(← f x)` would run first.
 
 **Types** (main-spec §4.1, §4.3, §4.4; structs/enums/typedefs are not built):
 
@@ -344,7 +349,7 @@ mutual) without any attribute — the `nat_*` cases rely on that; on `Int` it
 cannot (see `cases-lean-rejects`).
 
 Not translated yet (each is a hard error with location + why + fix):
-`?:`, uninitialised scalar locals (`int x;`; arrays may be uninitialised),
+uninitialised scalar locals (`int x;`; arrays may be uninitialised),
 `goto` and labels (**E102** — permanent, main-spec §6), structs, enums,
 typedefs, unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types

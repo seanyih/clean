@@ -34,13 +34,14 @@
 //   Cmp      text = < <= > >= == !=, kids [lhs, rhs]      } "conditions":
 //   And, Or  kids [lhs, rhs]                              } only legal where
 //   Not      one kid                                      } a test is expected
+//   Cond     `c ? a : b`: kids [test, then, else] → `if c then a else b` (main-spec §5.1)
 // In an `if` test, Cmp/And/Or/Not are Lean `Prop`s; where a `bool` is expected
 // they are `Bool` values (`decide (a < b)`, `&&`); check.cpp decides which.
 // Anywhere else they are refused.
 struct Expr {
     enum class Kind {
         IntLit, FloatLit, CharLit, StringLit, BoolLit, BvLit, Ident, Index, ArrayLit,
-        UnaryNeg, BitNot, Cast, Binary, Call, Cmp, And, Or, Not
+        UnaryNeg, BitNot, Cast, Binary, Call, Cmp, And, Or, Not, Cond
     };
     Kind kind = Kind::IntLit;
     std::string text;
