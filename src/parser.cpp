@@ -27,9 +27,9 @@
 namespace {
 
 const char* kSliceWhy =
-    "clean translates integer functions built from locals, assignments, `if`, "
-    "`switch`, loops (`for`, `while`, `do`) and `return`; other statements and "
-    "types arrive slice by slice (see spec/impl-spec.md).";
+    "clean translates functions, `typedef`/`enum`/`struct` declarations, `const` globals, "
+    "`extern` declarations and `VERIFY_FORALL` theorems; inside functions: locals, "
+    "assignments, `if`, `switch`, loops, `return`, I/O (see spec/impl-spec.md).";
 
 // Names Lean reserves. Not exhaustive; it exists so a collision fails here,
 // loudly, instead of inside Lean (main-spec D8).
@@ -1913,7 +1913,8 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         }
         if (p.peek().kind != Token::Kind::Ident)
             p.failHere("expected a declaration, found " + describe(p.peek()), kSliceWhy,
-                       "files contain functions; see spec/impl-spec.md.");
+                       "files contain functions, types, constants, `extern`s and `VERIFY_FORALL`s; "
+                       "see spec/impl-spec.md.");
         int defLine = p.peek().loc.line;
         const bool isExtern = p.isIdent("extern");  // main-spec §7.2.1: Lean already defines it
         if (isExtern && (isStatic || isInline))

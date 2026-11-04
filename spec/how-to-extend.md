@@ -1,7 +1,9 @@
 # How to extend `clean` — a developer's manual
 
 For downstream developers: where a feature lives, which files to touch, and
-how to prove it works. State: slices 0–9 (2026-10-24). If the architecture
+how to prove it works. State: slices 0–9 plus the 2026-11 feature commits
+(file-scope types, globals, externs, §5.4/§12 helpers, passthrough,
+`VERIFY_FORALL`; 2026-11-04). If the architecture
 moves, update this file with your slice.
 
 ## The pipeline (src/)

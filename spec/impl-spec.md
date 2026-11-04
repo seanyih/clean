@@ -3,10 +3,13 @@
 Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
-Current state: **slices 0–9** — functions over every type of main-spec §4.1
-and §4.3–4.5: integers, `intN_t`/`uintN_t`,
-`bool`, `char`, `bv(N)`, `float`/`double`, `void`, strings and arrays, with
-locals, `if`, `switch` (on `int`/`unsigned`), **loops (main-spec §6:
+Current state: **slices 0–9 plus the 2026-11 feature commits** — functions over
+every type of main-spec §4.1 and §4.3–4.5: integers, `intN_t`/`uintN_t`,
+`bool`, `char`, `bv(N)`, `float`/`double`, `void`, strings, arrays, and
+**`typedef`, `enum`, `struct`** (file-scope types), **`const` globals**,
+**value-level `extern`**, `static`/`inline`, `#pragma lean namespace`, with
+locals (an uninitialised one starts at zero), `?:`, `if`, `switch` (on
+`int`/`unsigned` and enums), **loops (main-spec §6:
 range-`for`, general `for`, `while`, `do … while`, `break`/`continue`)**,
 casts, automatic conversions between mixed types (D19), recursion, the opt-in
 `--lint=c-semantics` (D18), `void` array writers (OD11 c → D20), console
@@ -14,7 +17,11 @@ output with `IO` (main-spec §8: `printf`, `puts`, `putchar`,
 `fprintf(stderr, …)`, `main`), and **input and files**: `scanf`, `getchar`,
 `fgets`, `FILE *` with `fopen`/`fclose`/`fprintf`/`fscanf`/…, `exit`,
 `sprintf`, `main(argc, argv)` (see **Input and files** below), which loops
-turn into read-until-EOF programs. Adding a type is one table
+turn into read-until-EOF programs; the **§5.4 bit-vector helpers**, the **pure
+C library** of §12 (`<math.h>`, `abs`/`min`/`max`, limits, `strlen`/`strcmp`/
+`strcat`, `<ctype.h>`, `assert`), the **raw-Lean passthrough**
+(`LEAN_DECL`/`LEAN_STMT`/`LEAN_EXPR`), and **`VERIFY_FORALL` theorems** proved
+by `bv_decide`. Adding a type is one table
 row plus a few `case`s: see
 [how-to-extend.md](how-to-extend.md).
 
@@ -659,9 +666,9 @@ The suite (`test/run_e2e.sh`, `make test`):
    directory.
 
 Lean is needed for steps 3, 5 and 7 (skipped, with a notice, if `lean` is
-missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
-(input and files) with the loops slice — all passing (**143/143**, plus
-`run_e2e_hard.sh`).
+missing). Last full run **with Lean 4.35.0**: 2026-11-04, after the 2026-11
+feature commits (`?:` through the catalogue codes) — all passing
+(**199/199**, plus `run_e2e_hard.sh` and `test/cases-hard/hard.c`).
 
 ## Main-spec decisions honored here
 
