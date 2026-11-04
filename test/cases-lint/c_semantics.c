@@ -21,7 +21,7 @@ unsigned clampNeg(int x) { return x; }
 unsigned code(char c) { return c + 1; }
 
 // W010: a[i] panics out of range; W011: indexing a string is O(n)
-int at(int a[], size_t i) { return a[i]; }
+int elemAt(int a[], size_t i) { return a[i]; }
 char nth(char *s, size_t i) { return s[i]; }
 
 // W004: an uninitialised local starts at zero

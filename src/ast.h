@@ -24,7 +24,8 @@
 //   Ident    text = a parameter or local name
 //   Index    `a[i]`: kids [array or string, index]
 //   ArrayLit `{1, 2, 3}` (only as the initialiser of an array local): kids = elements,
-//            nested lists for `T a[M][N]`
+//            nested lists for `T a[M][N]`; also a struct initialiser `{1, 2}` / `{.x = 1}`
+//            (type = the struct; `fields` = the designators, empty when positional)
 //   UnaryNeg one kid: `-x`
 //   BitNot   one kid: `~x`
 //   Cast     one kid, `type` = target: `(T)x`, or an implicit conversion
@@ -35,13 +36,14 @@
 //   And, Or  kids [lhs, rhs]                              } only legal where
 //   Not      one kid                                      } a test is expected
 //   Cond     `c ? a : b`: kids [test, then, else] → `if c then a else b` (main-spec §5.1)
+//   Member   `p.x`: kids [the struct value], text = the field (main-spec §4.5)
 // In an `if` test, Cmp/And/Or/Not are Lean `Prop`s; where a `bool` is expected
 // they are `Bool` values (`decide (a < b)`, `&&`); check.cpp decides which.
 // Anywhere else they are refused.
 struct Expr {
     enum class Kind {
         IntLit, FloatLit, CharLit, StringLit, BoolLit, BvLit, Ident, Index, ArrayLit,
-        UnaryNeg, BitNot, Cast, Binary, Call, Cmp, And, Or, Not, Cond
+        UnaryNeg, BitNot, Cast, Binary, Call, Cmp, And, Or, Not, Cond, Member
     };
     Kind kind = Kind::IntLit;
     std::string text;
@@ -50,6 +52,14 @@ struct Expr {
     Type type;  // the C type of the value; set by check.cpp (parser: Cast target, BvLit width)
     bool implicit = false;  // Cast: inserted by check.cpp, not written in the C source
     bool io = false;        // Call: the callee does I/O, so Lean needs `(← f x)` (check.cpp)
+    std::vector<std::string> fields;  // ArrayLit as a struct initialiser: `.x =` designators, one per kid
+};
+
+// One step of an assignment target below its variable: `.field` or `[index]`.
+struct PathStep {
+    bool field = false;
+    std::string name;  // field: its name
+    Expr index;        // otherwise: the index
 };
 
 // One piece of a `printf` format (format.h): literal text, or one conversion.
@@ -140,6 +150,8 @@ struct Stmt {
     std::vector<long long> dims;      // Decl of an array: the declared sizes, outermost first
     bool noInit = false;              // Decl: `T a[N];` with no `=` (arrays are zero-filled, §4.4)
     std::vector<Expr> indices;        // Assign: the `[i][j]` of an element assignment
+    std::vector<PathStep> path;       // Assign: a target through fields, `p.a[i].x = e` (main-spec §4.5);
+                                      // when set, `indices` is empty
     std::string writeBack;            // CallStmt only: the callee writes one of its array
                                       // parameters (OD11 c); this variable receives the returned
                                       // array, emitted `x := f …` instead of `let _ := f …`
@@ -173,6 +185,8 @@ template <class F>
 void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
     for (const Stmt& s : stmts) {
         for (const Expr& ix : s.indices) f(ix);
+        for (const PathStep& st : s.path)
+            if (!st.field) f(st.index);
         const bool noExpr = s.kind == Stmt::Kind::Block || s.kind == Stmt::Kind::Break ||
                             s.kind == Stmt::Kind::Continue || s.kind == Stmt::Kind::Print ||
                             s.kind == Stmt::Kind::Scan || s.kind == Stmt::Kind::ReadLine ||
@@ -182,10 +196,14 @@ void forEachExpr(const std::vector<Stmt>& stmts, F&& f) {
         if (!noExpr) f(s.expr);
         for (const Stmt& part : s.init) {  // a For initialiser (one Decl/Assign/CallStmt)
             for (const Expr& ix : part.indices) f(ix);
+            for (const PathStep& st : part.path)
+                if (!st.field) f(st.index);
             if (!(part.kind == Stmt::Kind::Decl && part.noInit)) f(part.expr);
         }
         for (const Stmt& part : s.step) {  // a For step (one Assign/CallStmt)
             for (const Expr& ix : part.indices) f(ix);
+            for (const PathStep& st : part.path)
+                if (!st.field) f(st.index);
             f(part.expr);
         }
         for (const Expr& a : s.args) f(a);
@@ -224,18 +242,26 @@ struct Function {
 // order is already Lean's order).
 //   Alias   `typedef T name;` → `abbrev name := T`   (type = T)
 //   Enum    `enum E { A, B = 3 };` → `inductive E` + `open E` (+ `def E.toNat`)  (enumerators)
+//   Struct  `struct P { int x; int a[4]; };` → `structure P where … deriving Repr, BEq, Inhabited`  (fields)
 struct Enumerator {
     std::string name;
     long long value = 0;  // C's value: written, or one more than the previous
     Loc loc;
 };
+struct Field {
+    std::string name;
+    Type type;
+    std::vector<long long> dims;  // an array field: its declared sizes (its zero is that many zeros)
+    Loc loc;
+};
 struct TypeDecl {
-    enum class Kind { Alias, Enum };
+    enum class Kind { Alias, Enum, Struct };
     Kind kind = Kind::Alias;
     std::string name;
     Type type;
     std::vector<Enumerator> enumerators;  // Enum, in order
     bool explicitValues = false;          // Enum: some value was written (`B = 3`) → `def E.toNat`
+    std::vector<Field> fields;            // Struct, in order
     std::vector<Comment> comments;  // above the declaration, and inside it
     int line = 0;                   // D9: `-- c: file:LINE`
     Loc loc;                        // the name, for diagnostics
@@ -244,7 +270,7 @@ struct TypeDecl {
 // One translated file.
 struct TranslationUnit {
     std::string fileName;               // base name, e.g. "arith.c", used in comments
-    std::vector<TypeDecl> typeDecls;    // typedefs, enums …, source order (main-spec §4.5)
+    std::vector<TypeDecl> typeDecls;    // typedefs, enums, structs, source order (main-spec §4.5)
     std::vector<Function> functions;    // parser: source order; after sortDefinitions(): callees first
     std::set<std::string> pragmas;      // `#pragma lean NAME` words (set by main from the lexer)
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build

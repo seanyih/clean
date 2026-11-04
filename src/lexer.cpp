@@ -335,9 +335,9 @@ struct Lexer {
 LexResult lex(const std::string& source, const std::string& fileName) {
     LexResult res;
     Lexer L{source, fileName};
-    static const std::string kPunct = "(){}[],;:+-*/%<>=!&|^~?";
+    static const std::string kPunct = "(){}[],;:+-*/%<>=!&|^~?.";
     static const char* const kTwoChar[] = {"<=", ">=", "==", "!=", "&&", "||", "++", "--", "+=",
-                                           "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^="};
+                                           "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^=", "->"};
 
     while (!L.atEnd()) {
         char c = L.cur();

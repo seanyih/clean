@@ -287,7 +287,8 @@ struct WriterScan {
                 break;
             case Stmt::Kind::Assign: {
                 const int p = resolve(s.name);
-                if (!s.indices.empty() && p >= 0) noteWrite((size_t)p, s.loc);
+                const bool element = !s.indices.empty() || (!s.path.empty() && !s.path[0].field);
+                if (element && p >= 0) noteWrite((size_t)p, s.loc);
                 break;
             }
             case Stmt::Kind::CallStmt: {
@@ -503,6 +504,7 @@ struct Checker {
     const std::map<std::string, int>& writers;  // name → written array parameter's index (OD11 c)
     std::set<std::string>& helpers;             // the generated helpers this file needs (prelude.h)
     const std::map<std::string, EnumConst>& enumConsts;  // every enumerator of the file (main-spec §4.5)
+    const std::map<std::string, const TypeDecl*>& structs;  // every struct of the file, by name
     // scopes[0] holds the parameters and the function's top-level locals.
     std::vector<std::map<std::string, Var>> scopes;
     std::vector<bool> bare;  // per scope: opened by a bare `{ }` block (flattened in Lean)
@@ -575,8 +577,56 @@ struct Checker {
         wrapCast(e, target);
     }
 
+    // The field `name` of struct type `st` (refused when there is none).
+    const Field& fieldOf(Type st, const std::string& name, Loc loc) {
+        if (st.kind != Type::Kind::Struct)
+            fail(file, loc, "`." + name + "` on a `" + cName(st) + "`", "only structs have fields.",
+                 "read the field of a struct value.");
+        const TypeDecl& d = *structs.at(st.name);
+        for (const Field& f : d.fields)
+            if (f.name == name) return f;
+        fail(file, loc, "`" + cName(st) + "` has no field `" + name + "`",
+             "clean rejects unknown names instead of emitting Lean that fails later (D5).", "fix the field name.");
+    }
+
+    // `{1, 2}` / `{.x = 1, .y = 2}` as a value of struct type `st` (main-spec §4.5). Missing
+    // fields are C's zero; the emitter writes them out.
+    void structInit(Expr& lit, Type st) {
+        const TypeDecl& d = *structs.at(st.name);
+        lit.type = st;
+        if (lit.fields.empty() && lit.kids.size() > d.fields.size())
+            fail(file, lit.loc, "too many initialisers for `" + cName(st) + "`",
+                 "C rejects it too.", "drop the extra values.");
+        std::set<std::string> seen;
+        for (size_t k = 0; k < lit.kids.size(); ++k) {
+            const Field& f = lit.fields.empty() ? d.fields[k] : fieldOf(st, lit.fields[k], lit.kids[k].loc);
+            if (!seen.insert(f.name).second)
+                fail(file, lit.kids[k].loc, "field `" + f.name + "` is initialised twice",
+                     "C would keep the last one; clean does not pick.", "keep one.");
+            initValue(lit.kids[k], f.type, f.dims);
+        }
+    }
+
+    // One element of an initialiser list: a nested list for an array or a struct, else a value.
+    void initValue(Expr& kid, Type t, std::vector<long long> dims) {
+        if (kid.kind == Expr::Kind::ArrayLit && t.kind == Type::Kind::Struct) {
+            structInit(kid, t);
+        } else if (kid.kind == Expr::Kind::ArrayLit && t.kind == Type::Kind::Array) {
+            initList(kid, t, dims, 0);
+        } else {
+            if (kid.kind == Expr::Kind::ArrayLit)
+                fail(file, kid.loc, "a `{ … }` list for a `" + cName(t) + "`",
+                     "C would accept braces around a scalar; Lean has no such thing.", "drop the braces.");
+            valueAs(kid, t);
+        }
+    }
+
     Type valueType(Expr& e) {
         switch (e.kind) {
+        case Expr::Kind::Member: {  // `p.x` (main-spec §4.5)
+            Type st = value(e.kids[0]);
+            return fieldOf(st, e.text, e.loc).type;
+        }
         case Expr::Kind::IntLit:
             return Type::of(Type::Kind::Literal);
         case Expr::Kind::FloatLit:
@@ -879,6 +929,21 @@ struct Checker {
         Var target;
         if (lookup(s.name, target)) {
             Type t = target.type;
+            for (PathStep& st : s.path) {  // `p.a[i].x = v`: walk down through fields and elements
+                if (st.field) {
+                    t = fieldOf(t, st.name, s.loc).type;
+                    continue;
+                }
+                if (t.kind == Type::Kind::String)
+                    failCode("E101", file, s.loc, "mutation of a string by index",
+                             "Lean strings are immutable (main-spec §4.3).",
+                             "use an `Array Char`, or `uint8_t`/`bv(N)` arrays for byte buffers.");
+                if (t.kind != Type::Kind::Array)
+                    fail(file, s.loc, "indexing a `" + cName(t) + "` inside `" + s.name + "`",
+                         "only arrays can be indexed.", "index an array.");
+                valueAs(st.index, Type::of(Type::Kind::Nat));
+                t = t.elem();
+            }
             for (Expr& idx : s.indices) {  // `a[i][j] = v`: walk down to the element type
                 if (t.kind == Type::Kind::String)
                     failCode("E101", file, s.loc, "mutation of a string by index",
@@ -890,7 +955,8 @@ struct Checker {
                 valueAs(idx, Type::of(Type::Kind::Nat));
                 t = t.elem();
             }
-            if (!s.indices.empty() && !target.decl &&
+            const bool elementWrite = !s.indices.empty() || (!s.path.empty() && !s.path[0].field);
+            if (elementWrite && !target.decl && target.type.kind == Type::Kind::Array &&
                 (fn.writerParam < 0 || fn.params[(size_t)fn.writerParam].second != s.name))
                 // OD11 (c): a write to an array parameter is legal exactly in a writer,
                 // through its one written parameter. findWriters refuses every other
@@ -902,7 +968,7 @@ struct Checker {
                      "is not one.",
                      "make the function `void` and write to one array parameter, or copy "
                      "into a local array.");
-            if (s.indices.empty() && t.kind == Type::Kind::Array)
+            if ((s.path.empty() ? s.indices.empty() : s.path.back().field) && t.kind == Type::Kind::Array)
                 fail(file, s.loc, "assignment to the whole array `" + s.name + "`",
                      "C rejects it too.", "assign the elements one by one.");
             valueAs(s.expr, t);
@@ -1155,6 +1221,8 @@ struct Checker {
                     fail(file, kid.loc, "a row of the array must be a `{ … }` list", "the array has more than one dimension.",
                          "write `{ … }` for each row.");
                 initList(kid, elem, dims, depth + 1);
+            } else if (elem.kind == Type::Kind::Struct && kid.kind == Expr::Kind::ArrayLit) {
+                structInit(kid, elem);  // `struct P ps[2] = {{1, 2}, {3, 4}};`
             } else {
                 if (kid.kind == Expr::Kind::ArrayLit)
                     fail(file, kid.loc, "a nested `{ … }` for a one-dimensional array",
@@ -1165,6 +1233,10 @@ struct Checker {
     }
 
     void declStmt(Stmt& s) {
+        if (s.type.kind == Type::Kind::Struct && !s.noInit && s.expr.kind == Expr::Kind::ArrayLit) {
+            structInit(s.expr, s.type);  // `struct P p = {1, 2};`
+            return;
+        }
         if (s.type.kind != Type::Kind::Array) {
             if (!s.noInit) valueAs(s.expr, s.type);  // `int x;` starts at zero (§4.5, the emitter writes it)
             return;
@@ -1522,6 +1594,15 @@ void check(TranslationUnit& unit) {
                  "clean translates calls to `" + f.name + "` as the C library function (main-spec §8.1), "
                  "so a function of that name would never be called.",
                  "rename the function.");
+    std::map<std::string, const TypeDecl*> structs;  // every struct, by name (main-spec §4.5)
+    std::set<std::string> typeNames;
+    for (const TypeDecl& d : unit.typeDecls) {
+        if (!typeNames.insert(d.name).second)
+            fail(unit.fileName, d.loc, "`" + d.name + "` names two types",
+                 "C keeps `struct`, `enum` and `typedef` names apart; Lean has one namespace for them.",
+                 "rename one of them.");
+        if (d.kind == TypeDecl::Kind::Struct) structs[d.name] = &d;
+    }
     std::map<std::string, EnumConst> enumConsts;  // every enumerator, by name (main-spec §4.5)
     for (const TypeDecl& d : unit.typeDecls) {
         if (d.kind != TypeDecl::Kind::Enum) continue;
@@ -1560,7 +1641,7 @@ void check(TranslationUnit& unit) {
     for (const Function& f : unit.functions)
         if (f.writerParam >= 0) writers[f.name] = f.writerParam;
     for (Function& f : unit.functions)
-        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, {}, {}}.run();
+        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, structs, {}, {}}.run();
 
     // File-scope `printf` etc. (main-spec §8.2): checked like the body of a `void` function with
     // no parameters, so names, types and arities get the same treatment.
@@ -1569,7 +1650,7 @@ void check(TranslationUnit& unit) {
         script.name = "<file scope>";
         script.retType = Type::of(Type::Kind::Unit);
         script.body = std::move(unit.scripts);
-        Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, {}, {}}.run();
+        Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, structs, {}, {}}.run();
         unit.scripts = std::move(script.body);
     }
 

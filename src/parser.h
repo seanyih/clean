@@ -9,6 +9,9 @@
 //   typedef   :=  'typedef' type '*'* IDENT ';'          (main-spec §4.5)
 //   enumdecl  :=  'enum' IDENT? '{' IDENT ('=' INTLIT)? (',' IDENT ('=' INTLIT)?)* ','? '}' ';'
 //                 (also as the `type` of a typedef; `enum IDENT` names a defined one)
+//   structdecl:=  'struct' IDENT? '{' (type field (',' field)* ';')+ '}' ';'      field := '*'* IDENT ('[' N ']')*
+//                 (also as a typedef's type; `struct IDENT` names a defined one)
+//   lvalue    :=  IDENT ( '[' expr ']' | '.' IDENT )*   (the target of an assignment)
 //   prototype :=  type IDENT '(' params ')' ';'
 //   function  :=  attr* type IDENT '(' params ')' block
 //   attr      :=  '[[' 'lean' '::' 'partial' ']]'
@@ -38,6 +41,7 @@
 //   expr      :=  cond '?' expr ':' expr   (right-associative)  |  cond
 //   cond      :=  C precedence:  ||  &&  |  ^  &  == !=  < <= > >=  << >>  + -  * / %
 //                 unary - ! ~  and the cast '(' type ')' unary
+//   postfix   :=  primary ( '[' expr ']' | '.' IDENT )*      (`->` is E101)
 //   primary   :=  INTLIT | FLOATLIT | CHARLIT | true | false | IDENT | IDENT '(' args ')'
 //              |  'BV' '(' width ',' INTLIT ')'  | '(' expr ')'
 //

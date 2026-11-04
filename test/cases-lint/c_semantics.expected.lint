@@ -19,7 +19,7 @@ W009  c_semantics.c:18:35  a signed value is converted to `unsigned`; negatives 
 W007  c_semantics.c:21:32  a `char` is converted to an integer
       why:  Lean's `Char` is not a number; clean goes through `Nat` (`c.toNat`, `Char.ofNat n`), as main-spec §4.2 describes.
       fix:  use `uint8_t` for byte values.
-W010  c_semantics.c:24:36  `a[i]` panics when the index is out of range
+W010  c_semantics.c:24:40  `a[i]` panics when the index is out of range
       why:  it is `a[i]!`, which panics at run time.
       fix:  guard the index with a comparison (the `--index=proof` option of main-spec §10 is not built yet).
 W011  c_semantics.c:25:38  indexing a string is O(n)

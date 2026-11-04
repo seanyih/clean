@@ -24,11 +24,11 @@ struct Token {
     // CharLit → Lean spelling of a character literal, quotes included ("'a'", "'\\n'")
     // StringLit → Lean spelling of a string literal, quotes included ("\"abc\\n\"")
     // Comment → comment text without the // or /* */ delimiters (may span lines)
-    // Punct   → one of ( ) { } [ ] , ; : + - * / % < > = ! & | ^ ~ ?
+    // Punct   → one of ( ) { } [ ] , ; : + - * / % < > = ! & | ^ ~ ? .
     //           or a two/three-character operator: <= >= == != && || ++ -- += -= *= /= %=
-    //           << >> &= |= ^= <<= >>=
+    //           << >> &= |= ^= <<= >>= ->
     // Other   → something the lexer saw but this build does not translate
-    //           (. …); still a token so the parser can point at it
+    //           (`@`, `$` …); still a token so the parser can point at it
     std::string text;
     Loc loc;
     bool block = false;  // Comment only: true for `/* … */`, false for `// …`

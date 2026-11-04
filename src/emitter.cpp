@@ -96,12 +96,41 @@ int level(const Expr& e) {
     case Expr::Kind::Not:
     case Expr::Kind::Cast:   return 90;
     case Expr::Kind::Cond:   return 10;   // `if … then … else …` swallows everything to its right
+    case Expr::Kind::Member: return 100;  // `p.x`, `(f a).x`
     default:                 return 100;
     }
 }
 
 void emitExpr(const Expr& e, std::string& out);
 void emitCond(const Expr& e, std::string& out);
+std::string structLit(const Expr& lit, Type st);
+
+// The unit being emitted: struct definitions are looked up in it (zero values, initialisers).
+const TranslationUnit* gUnit = nullptr;
+
+const TypeDecl& structDecl(const std::string& name) {
+    for (const TypeDecl& d : gUnit->typeDecls)
+        if (d.kind == TypeDecl::Kind::Struct && d.name == name) return d;
+    return gUnit->typeDecls.front();  // unreachable: check.cpp resolved every struct type
+}
+
+// `x` as a function argument: parenthesised when it has a space.
+std::string arg(const std::string& x) { return x.find(' ') == std::string::npos ? x : "(" + x + ")"; }
+
+// C's "all zero bits" of `t`: an array of `dims[depth]` zeros, a struct with every field zero
+// (spelled out: `default` would leave its arrays empty), or types.h's zero of a scalar.
+std::string zeroText(Type t, const std::vector<long long>& dims, size_t depth) {
+    if (t.kind == Type::Kind::Array)
+        return "Array.replicate " + std::to_string(dims[depth]) + " " + arg(zeroText(t.elem(), dims, depth + 1));
+    if (t.kind == Type::Kind::Struct) {
+        std::string out = "{ ";
+        const TypeDecl& d = structDecl(t.name);
+        for (size_t k = 0; k < d.fields.size(); ++k)
+            out += (k ? ", " : "") + d.fields[k].name + " := " + zeroText(d.fields[k].type, d.fields[k].dims, 0);
+        return out + " : " + leanName(t) + " }";
+    }
+    return zeroValue(t);
+}
 
 // `f a b` — the call itself, without the `(← …)` an I/O function needs inside an expression.
 void emitCall(const Expr& e, std::string& out);
@@ -154,7 +183,8 @@ void emitExpr(const Expr& e, std::string& out) {
         out += "]!";
         return;
     case Expr::Kind::ArrayLit:
-        return;  // printed by emitArrayInit
+        if (e.type.kind == Type::Kind::Struct) out += structLit(e, e.type);  // a struct initialiser
+        return;  // an array one is printed by arrayInit
     case Expr::Kind::BvLit:
         out += e.text + "#" + std::to_string(e.type.width);
         return;
@@ -214,6 +244,10 @@ void emitExpr(const Expr& e, std::string& out) {
     case Expr::Kind::Not:
         out += "!";
         emitAtom(e.kids[0], out);
+        return;
+    case Expr::Kind::Member:  // `p.x` (main-spec §4.5)
+        emitAtom(e.kids[0], out);
+        out += "." + e.text;
         return;
     case Expr::Kind::Cond:  // `c ? a : b` (main-spec §5.1); the test is a decidable `Prop`
         out += "if ";
@@ -545,11 +579,9 @@ void emitScript(const Stmt& s, std::string& out) {
 
 // ---- arrays ---------------------------------------------------------------
 
-// `x` as a function argument: parenthesised when it has a space.
-std::string arg(const std::string& x) { return x.find(' ') == std::string::npos ? x : "(" + x + ")"; }
-
 // "All zero" of `t`, an array level deeper when `t` is an array (sizes from `dims`).
 std::string zeroOf(Type t, const std::vector<long long>& dims, size_t depth) {
+    if (t.kind == Type::Kind::Struct) return zeroText(t, dims, depth);
     if (t.kind != Type::Kind::Array) return zeroValue(t);
     return "Array.replicate " + std::to_string(dims[depth]) + " " + arg(zeroOf(t.elem(), dims, depth + 1));
 }
@@ -562,6 +594,7 @@ std::string arrayLit(const Expr& lit, Type arr, const std::vector<long long>& di
     for (const Expr& kid : lit.kids) {
         std::string t;
         if (elem.kind == Type::Kind::Array) t = arrayLit(kid, elem, dims, depth + 1);
+        else if (elem.kind == Type::Kind::Struct && kid.kind == Expr::Kind::ArrayLit) t = structLit(kid, elem);
         else emitExpr(kid, t);
         parts.push_back(t);
     }
@@ -576,10 +609,57 @@ std::string arrayLit(const Expr& lit, Type arr, const std::vector<long long>& di
     return list + " ++ Array.replicate " + std::to_string(n - k) + " " + arg(zero);
 }
 
+// A struct initialiser (main-spec §4.5): a complete positional list is the anonymous
+// constructor `⟨1, 2⟩`; otherwise every field by name, the missing ones C's zero:
+// `{ x := 1, y := 0 : P }`.
+std::string structLit(const Expr& lit, Type st) {
+    const TypeDecl& d = structDecl(st.name);
+    auto valueOf = [&](const Expr& kid, const Field& f) {
+        if (kid.kind == Expr::Kind::ArrayLit && f.type.kind == Type::Kind::Array)
+            return arrayLit(kid, f.type, f.dims, 0);
+        std::string v;
+        emitExpr(kid, v);
+        return v;
+    };
+    if (lit.fields.empty() && lit.kids.size() == d.fields.size()) {
+        std::string out = "⟨";
+        for (size_t k = 0; k < lit.kids.size(); ++k) out += (k ? ", " : "") + valueOf(lit.kids[k], d.fields[k]);
+        return out + "⟩";
+    }
+    std::string out = "{ ";
+    for (size_t k = 0; k < d.fields.size(); ++k) {
+        const Field& f = d.fields[k];
+        const Expr* given = nullptr;
+        for (size_t j = 0; j < lit.kids.size(); ++j)
+            if (lit.fields.empty() ? j == k : lit.fields[j] == f.name) given = &lit.kids[j];
+        out += (k ? ", " : "") + f.name + " := " + (given ? valueOf(*given, f) : zeroText(f.type, f.dims, 0));
+    }
+    return out + " : " + leanName(st) + " }";
+}
+
+// `p := { p with a := { p.a with x := v } }`, `a := a.set! i { a[i]! with x := v }` — an
+// assignment through fields (main-spec §4.5) and elements (§4.4), rebuilt from the inside out.
+std::string setPath(const std::string& base, const std::vector<PathStep>& path, size_t k,
+                    const std::string& v, const std::string& vAtom) {
+    const PathStep& st = path[k];
+    const bool last = k + 1 == path.size();
+    if (st.field) {
+        const std::string inner = base + "." + st.name;
+        return "{ " + base + " with " + st.name + " := " + (last ? v : setPath(inner, path, k + 1, v, vAtom)) + " }";
+    }
+    std::string at, raw;
+    emitAtom(st.index, at);
+    emitExpr(st.index, raw);
+    if (last) return base + ".set! " + at + " " + vAtom;
+    return base + ".set! " + at + " (" + setPath(base + "[" + raw + "]!", path, k + 1, v, vAtom) + ")";
+}
+
 // The initial value of an array local: its list, or default values (§4.4).
 std::string arrayInit(const Stmt& s) {
     if (!s.noInit) return arrayLit(s.expr, s.type, s.dims, 0);
-    std::string out = "default";
+    Type inner = s.type;
+    while (inner.kind == Type::Kind::Array) inner = inner.elem();
+    std::string out = inner.kind == Type::Kind::Struct ? zeroText(inner, {}, 0) : "default";
     for (size_t d = s.dims.size(); d-- > 0;) out = "Array.replicate " + std::to_string(s.dims[d]) + " " + arg(out);
     return out;
 }
@@ -603,13 +683,18 @@ void emitList(const std::vector<Stmt>& list, int level, const std::string& wret,
         case Stmt::Kind::Decl:
             out += pad(level) + (s.mut ? "let mut " : "let ") + s.name + " : " + leanName(s.type) + " := ";
             if (s.type.kind == Type::Kind::Array) out += arrayInit(s);
-            else if (s.noInit) out += zeroValue(s.type);  // `int x;` (main-spec §4.5, lint W004)
+            else if (s.noInit) out += zeroText(s.type, {}, 0);  // `int x;` (main-spec §4.5, lint W004)
             else emitExpr(s.expr, out);
             out += "\n";
             break;
         case Stmt::Kind::Assign:
             out += pad(level) + s.name + " := ";
-            if (s.indices.empty()) {
+            if (!s.path.empty()) {  // through a field: `p := { p with x := v }` (§4.5)
+                std::string v, vAtom;
+                emitExpr(s.expr, v);
+                emitAtom(s.expr, vAtom);
+                out += setPath(s.name, s.path, 0, v, vAtom);
+            } else if (s.indices.empty()) {
                 emitExpr(s.expr, out);
             } else {  // `a[i][j] = v;` → `a.set! i (a[i]!.set! j v)` (§4.4)
                 std::string v;
@@ -849,6 +934,7 @@ bool enumValueUsed(const TranslationUnit& unit, const std::string& name) {
 }  // namespace
 
 std::string emit(const TranslationUnit& unit) {
+    gUnit = &unit;
     std::string out;
     out += "-- generated by clean from " + unit.fileName + " — do not edit\n";
     out += "set_option autoImplicit false\n";
@@ -860,6 +946,11 @@ std::string emit(const TranslationUnit& unit) {
         switch (d.kind) {
         case TypeDecl::Kind::Alias:
             out += "abbrev " + d.name + " := " + leanName(d.type) + "\n";
+            break;
+        case TypeDecl::Kind::Struct:  // main-spec §4.5: derived so values can be printed and compared
+            out += "structure " + d.name + " where\n";
+            for (const Field& f : d.fields) out += "  " + f.name + " : " + leanName(f.type) + "\n";
+            out += "  deriving Repr, BEq, Inhabited\n";
             break;
         case TypeDecl::Kind::Enum:  // main-spec §4.5: the inductive, `open` for bare enumerators
             out += "inductive " + d.name + " where\n";

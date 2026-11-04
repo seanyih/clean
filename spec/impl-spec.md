@@ -4,7 +4,7 @@ Companion to `main-spec.md` (the agreement). This file says what the code
 does **today**. It is updated whenever a slice lands.
 
 Current state: **slices 0–9** — functions over every type of main-spec §4.1
-and §4.3–4.4 except structs/enums/typedefs: integers, `intN_t`/`uintN_t`,
+and §4.3–4.5: integers, `intN_t`/`uintN_t`,
 `bool`, `char`, `bv(N)`, `float`/`double`, `void`, strings and arrays, with
 locals, `if`, `switch` (on `int`/`unsigned`), **loops (main-spec §6:
 range-`for`, general `for`, `while`, `do … while`, `break`/`continue`)**,
@@ -115,6 +115,7 @@ a branch is refused: C runs only the chosen branch, `(← f x)` would run first.
 
 | `typedef T name;` (file scope)                            | `abbrev name := T`            |
 | `enum E { A, B = 3 };`, `enum E`, `typedef enum {…} E;`  | `inductive E` + `open E`      |
+| `struct P { … };`, `struct P`, `typedef struct {…} P;`   | `structure P where …`         |
 
 `const` and `restrict` are ignored (§4.7). Every expression has a type
 (`Expr::type`, set by the checker).
@@ -331,6 +332,35 @@ The Lean helpers (`fgets`, `scanInt`, `parseFloat`, `hexOf`, …) are small
 `def`s printed at the top of the output, only the ones the file uses; their
 text lives in `src/prelude.cpp`. A function of the same name is refused.
 
+**Structs** (main-spec §4.5). `struct P { int x; int a[3]; struct Q q; };`
+(and the `typedef struct` forms, as for enums) is `structure P where x : Int
+a : Array Int q : Q deriving Repr, BEq, Inhabited`. Fields are any type but
+`void` and `FILE *`, several per line (`double w, h;`); an array field keeps
+its declared size for its zero, and `char name[16]` is a `String`.
+
+| C                                  | Lean                                              |
+| ---------------------------------- | ------------------------------------------------- |
+| `p.x`, `a[i].x`, `f(p).x`          | `p.x`, `a[i]!.x`, `(f p).x`                       |
+| `struct P p = {1, 2};` (complete)  | `let p : P := ⟨1, 2⟩`                             |
+| `{.x = 1}`, `{1}` (partial)        | `{ x := 1, y := 0 : P }` — missing fields are zero |
+| `struct P p;`                      | every field zero, spelled out (`default` would leave array fields empty) |
+| `p.x = 5;`  `p.q.y += 1;`          | `p := { p with x := 5 }`  `p := { p with q := { p.q with y := p.q.y + 1 } }` |
+| `p.a[i] = v;`  `ps[i].x = v;`      | `p := { p with a := p.a.set! i v }`  `ps := ps.set! i ({ ps[i]! with x := v })` |
+
+Structs are values, as in C: a struct parameter that is written is a local
+copy (`let mut p := p`), and so are the arrays inside it. Writing a field of an
+element of an *array parameter* (`ps[0].x = 0`) changes the caller's array in C,
+so it makes the function a D20 writer like any element write. Arrays of structs
+are initialised with nested lists (`{{1, 2}, {3, 4}}`, a short list padded with
+zero structs). Refused: `->` and pointers to structs (E101), bit-fields (E111),
+`==`/arithmetic/truth tests on structs (C has none either; compare fields),
+unknown fields, a list mixing designated and positional values, nested
+designators (`.p.x = 1`), a struct defined inside a function or another struct,
+a global variable after the definition (E106), two types of one name (Lean has
+one namespace for `struct`, `enum` and `typedef` names). Names Lean reserves
+(`at`, `end`, `where`, `instance`, … — probed on 4.35) are refused as field
+and variable names (D8).
+
 **Switch.** The scrutinee is `int`, `unsigned` or an `enum` (match patterns on
 the other types are unverified). Labels are integer literals (`3`, `-1`,
 `0x10`) or enumerators (see **File-scope types**). Labels that
@@ -392,8 +422,8 @@ cannot (see `cases-lean-rejects`).
 
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
-`goto` and labels (**E102** — permanent, main-spec §6), structs,
-unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
+`goto` and labels (**E102** — permanent, main-spec §6),
+unions, compound literals (`(struct P){1, 2}`), `static`/`extern`/`inline`, the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
@@ -607,8 +637,6 @@ missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
    before the loop and at its end); `atoi`/`strtol` (§12.2). (The
    uninitialised scalar local, `int n; scanf("%d", &n);`, is done: it starts
    at the type's zero, main-spec §4.5, lint W004.)
-3. Structs (§4.5): typedefs and enums landed the file-scope declarations
-   (`TranslationUnit::typeDecls`).
 3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
    give E301 its fix — and the `<string.h>` helpers (§12.3).
 4. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and

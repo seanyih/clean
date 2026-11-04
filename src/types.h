@@ -33,11 +33,12 @@ struct Type {
         Unit,          // C `void` (return type only)                       → `Unit`
         File,          // C `FILE *` (only ever as a pointer)               → `IO.FS.Stream`
         Enum,          // C `enum E`, name = E                               → `E` (an `inductive`)
+        Struct,        // C `struct P`, name = P                             → `P` (a `structure`)
     };
     Kind kind = Kind::Int;
     int width = 0;            // SInt/UInt: 8 16 32 64; BitVec: N; otherwise 0
     std::vector<Type> args;   // Array: the element type, as args[0]
-    std::string name;         // Enum: the type's name (part of its identity)
+    std::string name;         // Enum, Struct: the type's name (part of its identity)
     std::string alias;        // the `typedef` name this type was written with (`byte`): printed instead of
                               // the Lean type, ignored by `==` (an `abbrev` is the type it abbreviates)
 
@@ -72,6 +73,7 @@ bool isArray(Type t);
 bool isString(Type t);
 bool isFile(Type t);
 bool isEnum(Type t);
+bool isStruct(Type t);
 
 // The Lean spelling: `Int`, `UInt8`, `BitVec 8`, `Float`, `Bool`, …
 std::string leanName(Type t);

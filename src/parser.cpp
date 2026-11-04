@@ -41,6 +41,12 @@ const std::set<std::string> kLeanKeywords = {
     "show", "Type", "Prop", "Unit", "Nat", "Int", "Bool", "String", "Char",
     "Float", "Float32", "BitVec", "Array", "List", "Option", "true", "false", "decide",
     "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64", "use",
+    // tokens Lean 4.35 reserves that are plausible C names (each probed with `def NAME : Nat := 1`)
+    "at", "end", "where", "using", "deriving", "instance", "class", "section", "extends", "local",
+    "generalizing", "calc", "nomatch", "suffices", "notation", "macro", "syntax", "universe",
+    "set_option", "attribute", "export", "mutual", "protected", "noncomputable", "unsafe",
+    "termination_by", "decreasing_by", "omit", "include", "renaming", "hiding", "prefix", "infix",
+    "postfix", "opaque", "elab",
 };
 
 
@@ -104,6 +110,7 @@ struct Parser {
     size_t nextComment = 0;  // first comment not handed out yet
     std::map<std::string, Type> typedefs;  // `typedef T name;` seen so far: name → T (its `alias` = name)
     std::map<std::string, Type> enumTags;  // `enum Tag { … }` seen so far: Tag → its type
+    std::map<std::string, Type> structTags;  // `struct Tag { … }` seen so far: Tag → its type
     bool typeBodies = false;               // file scope: `enum … { … }` may be defined here
     std::vector<TypeDecl> newDecls;        // type declarations met while parsing one file-scope item
 
@@ -112,6 +119,90 @@ struct Parser {
         if (t.size() > 2 && t[0] == '0' && (t[1] == 'b' || t[1] == 'B'))
             return (long long)std::strtoull(t.c_str() + 2, nullptr, 2);
         return (long long)std::strtoull(t.c_str(), nullptr, 0);
+    }
+
+    // `struct Tag` (defined above), or a definition `struct [Tag] { T f; T g[N]; … }`
+    // at file scope (main-spec §4.5), queued in `newDecls` like an enum.
+    Type parseStructType() {
+        Loc at = peek().loc;
+        ++i;  // `struct`
+        std::string tag;
+        Loc tagAt = peek().loc;
+        if (!isPunct("{")) {
+            Token t = expectName("the name of the `struct`");
+            checkName(t);
+            tag = t.text;
+        }
+        if (!isPunct("{")) {
+            auto it = structTags.find(tag);
+            if (it == structTags.end())
+                fail(file, tagAt, "`struct " + tag + "` is not defined above this point",
+                     "Lean needs the `structure` before its first use; a struct that points to itself "
+                     "(a linked list) is a pointer, which main-spec §4.6 refuses.",
+                     "define it first: `struct " + tag + " { … };`.");
+            return it->second;
+        }
+        if (!typeBodies)
+            fail(file, at, "a `struct` is defined inside a function, a parameter list or another struct",
+                 "Lean's `structure` is a file-scope declaration.",
+                 "define the `struct` at file scope, above its use.");
+        if (structTags.count(tag))
+            fail(file, tagAt, "`struct " + tag + "` is defined twice", "C rejects it too.", "rename one of them.");
+        TypeDecl d;
+        d.kind = TypeDecl::Kind::Struct;
+        d.name = tag;
+        d.line = at.line;
+        d.loc = tag.empty() ? at : tagAt;
+        ++i;  // `{`
+        typeBodies = false;  // a field's type cannot define a new struct/enum
+        while (!isPunct("}")) {
+            for (Comment& c : takeComments(i, true)) d.comments.push_back(std::move(c));
+            if (isPunct("}")) break;
+            Loc ft = peek().loc;
+            Type base = parseCType();
+            while (true) {  // `int x, y;` declares two fields
+                int stars = parseStars();
+                Token n = expectName("a field name");
+                checkName(n);
+                Field f;
+                f.name = n.text;
+                f.loc = n.loc;
+                while (isPunct("[")) f.dims.push_back(parseArraySize());
+                for (long long dim : f.dims)
+                    if (dim < 0)
+                        fail(file, n.loc, "a field array without a size",
+                             "a flexible array member has no fixed size, and its storage is a pointer trick.",
+                             "write the size: `" + n.text + "[N]`.");
+                if (isPunct(":"))
+                    failCode("E111", file, peek().loc, "a bit-field `" + n.text + " : …`",
+                             "Lean structures have no bit-fields (main-spec §4.5).",
+                             "use a bit-vector field: `bv(N) " + n.text + ";`.");
+                f.type = declare(base, stars, f.dims.size(), ft, false);
+                if (f.type.kind == Type::Kind::Unit || f.type.kind == Type::Kind::File)
+                    fail(file, n.loc, "a field of type `" + cName(f.type) + "`",
+                         f.type.kind == Type::Kind::File ? "a stream is not a value a structure can hold "
+                                                           "(it has no `Repr`/`BEq`)."
+                                                         : "`void` has no values.",
+                         "pass it as a separate parameter.");
+                if (f.type.kind == Type::Kind::String && !f.dims.empty() && stars == 0) f.dims.clear();  // `char s[16]`
+                for (const Field& g : d.fields)
+                    if (g.name == f.name)
+                        fail(file, n.loc, "field `" + f.name + "` is declared twice", "C rejects it too.",
+                             "rename one of them.");
+                d.fields.push_back(std::move(f));
+                if (!isPunct(",")) break;
+                ++i;
+            }
+            expectPunct(";", "after the field");
+        }
+        ++i;  // `}`
+        typeBodies = true;
+        if (d.fields.empty())
+            fail(file, at, "a `struct` with no fields", "C rejects it too.", "add a field.");
+        Type t = Type::named(Type::Kind::Struct, tag);
+        if (!tag.empty()) structTags[tag] = t;
+        newDecls.push_back(std::move(d));
+        return t;
     }
 
     // `enum Tag` (defined above), or a definition `enum [Tag] { A, B = 3, C }`
@@ -237,7 +328,7 @@ struct Parser {
     bool isTypeToken(size_t j) const {
         return toks[j].kind == Token::Kind::Ident &&
                (classifyTypeWord(toks[j].text) != TypeWord::NotAType || typedefs.count(toks[j].text) ||
-                toks[j].text == "enum");
+                toks[j].text == "enum" || toks[j].text == "struct");
     }
     bool atTypeWord() const { return isTypeToken(i); }
 
@@ -245,7 +336,7 @@ struct Parser {
     bool atDeclStart() const {
         return peek().kind == Token::Kind::Ident &&
                (classifyTypeWord(peek().text) == TypeWord::Supported || typedefs.count(peek().text) ||
-                peek().text == "enum");
+                peek().text == "enum" || peek().text == "struct");
     }
     static bool isQualifier(const Token& t) {
         return t.kind == Token::Kind::Ident && (t.text == "const" || t.text == "restrict");
@@ -341,8 +432,11 @@ struct Parser {
             while (isQualifier(peek())) ++i;
             return typedefs.at(toks[j].text);
         }
-        if (isQualifier(peek()) && toks[j].kind == Token::Kind::Ident && toks[j].text == "enum") i = j;
+        if (isQualifier(peek()) && toks[j].kind == Token::Kind::Ident &&
+            (toks[j].text == "enum" || toks[j].text == "struct"))
+            i = j;
         if (isIdent("enum")) return parseEnumType();
+        if (isIdent("struct")) return parseStructType();
         if (isBitVecWord(peek().text)) return parseBitVec();
         std::vector<std::string> words;
         while (atTypeWord() && !isBitVecWord(peek().text)) words.push_back(toks[i++].text);
@@ -411,6 +505,12 @@ struct Parser {
         return lhs;
     }
 
+    [[noreturn]] void failArrow() {
+        failCode("E101", file, peek().loc, "`->` reads a field through a pointer",
+                 "main-spec §4.6 has no pointers to structs; Lean structures are values.",
+                 "pass the struct itself and write `p.x`.");
+    }
+
     [[noreturn]] void failIncDec() {
         failCode("E110", file, peek().loc, "`" + peek().text + "` inside an expression",
                  "an increment has a side effect, and Lean expressions have none.",
@@ -444,7 +544,19 @@ struct Parser {
             return e;
         }
         Expr e = parsePrimary();
-        while (isPunct("[")) {  // `a[i]`, `a[i][j]`
+        while (isPunct("[") || isPunct(".") || isPunct("->")) {  // `a[i]`, `a[i][j]`, `p.x`, `a[i].x`
+            if (isPunct("->")) failArrow();
+            if (isPunct(".")) {
+                ++i;
+                Token f = expectIdent("a field name after `.`");
+                Expr m;
+                m.kind = Expr::Kind::Member;
+                m.text = f.text;
+                m.loc = e.loc;
+                m.kids.push_back(std::move(e));
+                e = std::move(m);
+                continue;
+            }
             ++i;
             Expr ix;
             ix.kind = Expr::Kind::Index;
@@ -602,30 +714,46 @@ struct Parser {
     // `semi` = the statement form wants its `;`; a `for` step does not (a `)` follows).
     Stmt parseAssignment(bool semi) {
         Token name = toks[i++];
-        std::vector<Expr> indices;
-        while (isPunct("[")) {
-            ++i;
-            indices.push_back(parseExpr());
-            expectPunct("]", "to close the index");
+        std::vector<PathStep> path;  // `[i]` and `.f` steps below the variable
+        bool viaField = false;
+        while (isPunct("[") || isPunct(".") || isPunct("->")) {
+            if (isPunct("->")) failArrow();
+            PathStep st;
+            if (isPunct(".")) {
+                ++i;
+                st.field = true;
+                st.name = expectIdent("a field name after `.`").text;
+                viaField = true;
+            } else {
+                ++i;
+                st.index = parseExpr();
+                expectPunct("]", "to close the index");
+            }
+            path.push_back(std::move(st));
         }
-        auto var = [&]() {  // the left-hand side read back: `a`, or `a[i][j]`
+        auto var = [&]() {  // the left-hand side read back: `a`, `a[i][j]`, `p.a[i].x`
             Expr v;
             v.kind = Expr::Kind::Ident;
             v.text = name.text;
             v.loc = name.loc;
-            for (const Expr& idx : indices) {
+            for (const PathStep& st : path) {
                 Expr ix;
-                ix.kind = Expr::Kind::Index;
+                ix.kind = st.field ? Expr::Kind::Member : Expr::Kind::Index;
                 ix.loc = name.loc;
+                if (st.field) ix.text = st.name;
                 ix.kids.push_back(std::move(v));
-                ix.kids.push_back(idx);
+                if (!st.field) ix.kids.push_back(st.index);
                 v = std::move(ix);
             }
             return v;
         };
         auto assign = [&](Expr rhs) {
             Stmt s = makeAssign(name, std::move(rhs));
-            s.indices = indices;
+            if (viaField) {
+                s.path = path;
+            } else {
+                for (const PathStep& st : path) s.indices.push_back(st.index);
+            }
             return s;
         };
         if (isPunct("++") || isPunct("--")) {
@@ -671,7 +799,12 @@ struct Parser {
     bool atAssignment() const {
         if (peek().kind != Token::Kind::Ident) return false;
         size_t j = i + 1;
-        while (toks[j].kind == Token::Kind::Punct && toks[j].text == "[") {
+        while (toks[j].kind == Token::Kind::Punct && (toks[j].text == "[" || toks[j].text == ".")) {
+            if (toks[j].text == ".") {  // `.field`
+                if (toks[j + 1].kind != Token::Kind::Ident) return false;
+                j += 2;
+                continue;
+            }
             int depth = 0;
             for (; toks[j].kind != Token::Kind::End; ++j) {
                 if (toks[j].kind == Token::Kind::Punct && toks[j].text == "[") ++depth;
@@ -690,11 +823,34 @@ struct Parser {
         e.loc = peek().loc;
         expectPunct("{", "to open the initialiser list");
         while (!isPunct("}")) {
+            if (isPunct(".")) {  // `.x = e`: a designated struct field (main-spec §4.5)
+                ++i;
+                Token f = expectIdent("a field name after `.`");
+                if (isPunct(".") || isPunct("["))
+                    failHere("a nested designator", "clean reads one field name per designator.",
+                             "write the inner value as its own list: `.p = { .x = 1 }`.");
+                expectPunct("=", "after the designator `." + f.text + "`");
+                e.fields.resize(e.kids.size());
+                e.fields.push_back(f.text);
+            } else if (isPunct("[")) {
+                failHere("an array designator `[i] = …`", "clean reads array initialisers in order.",
+                         "list the elements in order.");
+            } else if (!e.fields.empty()) {
+                e.fields.push_back("");
+            }
             e.kids.push_back(isPunct("{") ? parseInitList() : parseExpr());
             if (!isPunct(",")) break;
             ++i;
         }
         expectPunct("}", "to close the initialiser list");
+        if (!e.fields.empty()) {
+            e.fields.resize(e.kids.size());
+            for (const std::string& f : e.fields)
+                if (f.empty())
+                    fail(file, e.loc, "a list mixes designated (`.x = …`) and positional values",
+                         "clean reads a struct initialiser either by name or in order.",
+                         "name every field, or none.");
+        }
         return e;
     }
 
@@ -1210,6 +1366,8 @@ struct Parser {
                 failHere("an array is initialised with `{ … }`",
                          "C cannot copy an array with `=`.", "write the initialiser list.");
             s.expr = parseInitList();
+        } else if (s.type.kind == Type::Kind::Struct && isPunct("{")) {
+            s.expr = parseInitList();  // `struct P p = {1, 2};` / `{.x = 1}` (main-spec §4.5)
         } else {
             if (isPunct("{") && s.type.kind == Type::Kind::String)
                 failHere("a `char` array is a `String` in Lean",
@@ -1468,22 +1626,24 @@ struct Parser {
         Type t = declare(base, stars, 0, at, false);
         if (t.kind == Type::Kind::Unit)
             fail(file, at, "a `typedef` of `void`", "`void` has no values to name.", "use a real type.");
+        if (stars && base.kind == Type::Kind::Struct)
+            failCode("E101", file, at, "a `typedef` of a pointer to a struct",
+                     "main-spec §4.6 accepts no pointers to structs.", "typedef the struct itself.");
         expectPunct(";", "after the `typedef`");
         if (typedefs.count(name.text))
             fail(file, name.loc, "`" + name.text + "` is defined twice by `typedef`",
                  "Lean allows only one definition per name.", "rename one of them.");
         for (Comment& c : takeComments(i, false)) d.comments.push_back(std::move(c));
-        if (t.kind == Type::Kind::Enum && t.name.empty() && stars == 0) {
+        const bool named = t.kind == Type::Kind::Enum || t.kind == Type::Kind::Struct;
+        if (named && t.name.empty()) {
             // `typedef enum { … } Color;`: the anonymous type takes the name, no `abbrev` needed
             TypeDecl& def = newDecls.back();
             def.name = name.text;
             def.comments.insert(def.comments.begin(), d.comments.begin(), d.comments.end());
-            typedefs[name.text] = Type::named(Type::Kind::Enum, name.text);
+            typedefs[name.text] = Type::named(t.kind, name.text);
             return;
         }
-        if (t.kind == Type::Kind::Enum && t.name.empty())
-            fail(file, at, "a pointer to an anonymous `enum`", "main-spec §4.6 has no such pointer.", "drop the `*`.");
-        if (t.kind == Type::Kind::Enum && t.name == name.text) {  // `typedef enum Color {…} Color;`
+        if (named && t.name == name.text) {  // `typedef enum Color {…} Color;`
             typedefs[name.text] = t;
             if (!newDecls.empty()) newDecls.back().comments.insert(newDecls.back().comments.begin(),
                                                                    d.comments.begin(), d.comments.end());
@@ -1497,17 +1657,20 @@ struct Parser {
         newDecls.push_back(std::move(d));
     }
 
-    // `enum Tag { … };` at file scope.
+    // `enum Tag { … };` / `struct Tag { … };` at file scope.
     void parseEnumDecl(std::vector<Comment> comments) {
         typeBodies = true;
-        parseEnumType();
+        const bool isStruct = isIdent("struct");
+        if (isStruct) parseStructType();
+        else parseEnumType();
         typeBodies = false;
         TypeDecl& d = newDecls.back();
         d.comments.insert(d.comments.begin(), comments.begin(), comments.end());
         if (!isPunct(";"))
-            failCode("E106", file, peek().loc, "a global variable of an `enum` type",
+            failCode("E106", file, peek().loc, std::string("a global variable of the ") + (isStruct ? "struct" : "enum") + " type",
                      "mutable globals are ⛔ (main-spec §7.3); Lean definitions are constants.",
-                     "pass the value as a parameter, or define the `enum` alone: `enum E { … };`.");
+                     "pass the value as a parameter, or define the type alone: `" +
+                         std::string(isStruct ? "struct S" : "enum E") + " { … };`.");
         ++i;
         for (Comment& c : takeComments(i, false)) d.comments.push_back(std::move(c));
     }
@@ -1551,7 +1714,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             toks.push_back(t);
     }
 
-    Parser p{toks, comments, definedNames, definedValues, fileName, 0, 0, {}, {}, false, {}};
+    Parser p{toks, comments, definedNames, definedValues, fileName, 0, 0, {}, {}, {}, false, {}};
     TranslationUnit unit;
     unit.fileName = fileName;
 
@@ -1583,9 +1746,9 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             p.newDecls.clear();
             continue;
         }
-        if (p.isIdent("enum") && (p.isPunctAt(p.i + 1, "{") ||
+        if ((p.isIdent("enum") || p.isIdent("struct")) && (p.isPunctAt(p.i + 1, "{") ||
                                   (p.toks[p.i + 1].kind == Token::Kind::Ident && p.isPunctAt(p.i + 2, "{")))) {
-            p.parseEnumDecl(std::move(pending));  // `enum E { … };` (main-spec §4.5)
+            p.parseEnumDecl(std::move(pending));  // `enum E { … };` / `struct P { … };` (main-spec §4.5)
             pending.clear();
             for (TypeDecl& d : p.newDecls) unit.typeDecls.push_back(std::move(d));
             p.newDecls.clear();
