@@ -154,6 +154,37 @@ stand for their values. Refused: an `enum` defined inside a function, used
 before its definition, defined twice, empty, or with a global variable after
 it (E106); two enumerators of one name; an enumerator named like a function.
 
+**Theorems: `VERIFY_FORALL`** (main-spec §9.2, §9.3, value level).
+
+```c
+avg_le_max: VERIFY_FORALL(uint8_t a, uint8_t b) { avg_floor(a, b) <= (a > b ? a : b) && avg_floor(a, a) == a; }
+```
+
+```lean
+set_option linter.unusedSimpArgs false in
+theorem avg_le_max : ∀ (a b : UInt8), avg_floor a b <= (if a > b then a else b) ∧ avg_floor a a = a := by
+  intro a b
+  try simp only [avg_floor]
+  all_goals bv_decide
+```
+
+The variables are `bv(N)`, `uintN_t`, `intN_t` or `bool` (`bv_decide` searches
+bits; an unbounded `int` is refused). The body is one `bool` expression, written
+as a test (an `&&` chain proves every conjunct). The theorem is named by a C
+label before it, else `f_eq_g` for `f(…) == g(…)`, else `verify_LINE`. The proof
+unfolds every function and constant of the file the statement reaches,
+transitively (`bv_decide` treats a definition it cannot see into as an unknown,
+main-spec §9.2), plus `Id.run`, `pure`, `bind` when one of them is a `do` block,
+then runs `bv_decide`, whose SAT certificate Lean checks. `import
+Std.Tactic.BVDecide` heads the file only when a theorem is generated. The
+theorems come after the functions. **A false claim is not hidden:** the file
+translates, and Lean rejects it with a counterexample
+(`test/cases-lean-rejects/verify_false.c`). Loops do not unfold (`while` and
+`for` are opaque to `simp`), so a function with a loop cannot be verified this
+way. **W012** (always shown) warns above 64 bits. Not built: the
+loop-pattern form (§9.4), `VERIFY_AT` and `HW` sides (Sparkle), `[[lean::proof]]`
+and `--prove=none` (§9.6, 🟡).
+
 **Raw Lean** (main-spec §11.1, the escape hatch). The argument is a string
 literal of Lean source, passed through as written (C escapes undone: `\n`
 starts a new line, `\"` is a quote). It is not read by clean, so Lean is its
@@ -515,7 +546,8 @@ unions, compound literals (`(struct P){1, 2}`), `strcpy`/`memcpy`/`memset`,
 `fmod`/`hypot`/`lround`, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
-one is an error, not a silent wrong name), Sparkle, theorems.
+one is an error, not a silent wrong name), Sparkle, the loop-pattern and
+`VERIFY_AT` theorem forms.
 
 Diagnostic codes: **E102** (`goto`/labels), **E103** (assignment as
 expression; the `for`-header comma), **E105** (switch fall-through), **E110**

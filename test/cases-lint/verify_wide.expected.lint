@@ -1,0 +1,3 @@
+W012  verify_wide.c:4:1  `VERIFY_FORALL` ranges over 72 bits
+      why:  `bv_decide` searches all of them; above 64 the SAT problem can take very long.
+      fix:  split the check, or narrow the variables.

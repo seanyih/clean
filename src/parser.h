@@ -6,6 +6,7 @@
 // printf is cut up by format.h. Grammar:
 //
 //   file      :=  ( comment | ';' | typedef | enumdecl | structdecl | global | prototype | function | print )*  EOF
+//   verify    :=  (IDENT ':')? 'VERIFY_FORALL' '(' type IDENT (',' type IDENT)* ')' '{' expr ';' '}'   (main-spec §9.3)
 //   leandecl  :=  'LEAN_DECL' '(' STRINGLIT ')' ';'?   (raw Lean; above every function: before them, else at the end)
 //   global    :=  a local declaration whose type words include `const` (main-spec §7.3; else E106)
 //   extern    :=  'extern' ( prototype | 'const' type IDENT ('[' N ']')* ';' )   (main-spec §7.2.1)

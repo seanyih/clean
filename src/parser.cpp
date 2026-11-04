@@ -1803,6 +1803,44 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             unit.scripts.push_back(std::move(st));
             continue;
         }
+        const bool labelled = p.peek().kind == Token::Kind::Ident && p.isPunctAt(p.i + 1, ":") &&
+                              p.toks[p.i + 2].kind == Token::Kind::Ident && p.toks[p.i + 2].text == "VERIFY_FORALL";
+        if (labelled || (p.isIdent("VERIFY_FORALL") && p.isPunctAt(p.i + 1, "("))) {  // main-spec §9.3
+            Verify v;
+            if (labelled) {  // `name: VERIFY_FORALL(…)` — the label names the theorem (§9.4)
+                Token n = p.toks[p.i];
+                p.checkName(n);
+                v.name = n.text;
+                v.named = true;
+                p.i += 2;
+            }
+            v.loc = p.peek().loc;
+            v.line = v.loc.line;
+            v.comments = std::move(pending);
+            pending.clear();
+            ++p.i;  // VERIFY_FORALL
+            p.expectPunct("(", "after `VERIFY_FORALL`");
+            while (true) {
+                Type t = p.parseCType();
+                Token n = p.expectName("the name of a `VERIFY_FORALL` variable");
+                p.checkName(n);
+                v.binders.emplace_back(t, n.text);
+                if (!p.isPunct(",")) break;
+                ++p.i;
+            }
+            p.expectPunct(")", "to close the `VERIFY_FORALL` variables");
+            p.expectPunct("{", "to open the `VERIFY_FORALL` body");
+            v.body = p.parseExpr();
+            p.expectPunct(";", "after the `VERIFY_FORALL` expression");
+            if (!p.isPunct("}"))
+                p.failHere("a `VERIFY_FORALL` body holds one expression",
+                           "the theorem states one proposition (main-spec §9.3).",
+                           "join the checks with `&&`: `{ f(a) == g(a) && h(a) == a; }`.");
+            ++p.i;
+            for (Comment& c : p.takeComments(p.i, false)) v.comments.push_back(std::move(c));
+            unit.verifies.push_back(std::move(v));
+            continue;
+        }
         if (p.isIdent("LEAN_DECL") && p.isPunctAt(p.i + 1, "(")) {  // raw Lean at file scope (§11.1)
             std::string text = p.parseRawLean("LEAN_DECL");
             if (p.isPunct(";")) ++p.i;

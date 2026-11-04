@@ -277,6 +277,18 @@ struct TypeDecl {
     Loc loc;                        // the name, for diagnostics
 };
 
+// `VERIFY_FORALL(bv(8) a, …) { e; }` at file scope (main-spec §9.2, §9.3): a theorem
+// `∀ a …, e` proved by unfolding the functions `e` reaches, then `bv_decide`.
+struct Verify {
+    std::string name;    // the theorem's name: the C label before it, else `f_eq_g` / `verify_LINE` (check.cpp)
+    bool named = false;  // a label gave the name
+    std::vector<std::pair<Type, std::string>> binders;
+    Expr body;           // one `bool` expression (an `&&` chain proves every conjunct)
+    std::vector<Comment> comments;
+    int line = 0;
+    Loc loc;
+};
+
 // One translated file.
 struct TranslationUnit {
     std::string fileName;               // base name, e.g. "arith.c", used in comments
@@ -287,6 +299,7 @@ struct TranslationUnit {
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build
     std::vector<Comment> trailingComments;  // comments after the last definition
     std::vector<Stmt> scripts;          // file-scope `printf` etc. (§8.2), source order; emitted as `#eval` after the functions
+    std::vector<Verify> verifies;       // VERIFY_FORALL theorems (main-spec §9), emitted after the functions
     std::vector<std::string> leanDeclsBefore;  // `LEAN_DECL("…")` above every function: after the types, before them
     std::vector<std::string> leanDeclsAfter;   // `LEAN_DECL("…")` below a function: at the end (main-spec §11.1)
     std::set<std::string> helpers;      // generated Lean helpers the file needs, e.g. "hexOf" (check.cpp; prelude.h)

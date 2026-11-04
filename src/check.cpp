@@ -16,6 +16,7 @@
 #include "check.h"
 
 #include <cstdlib>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <set>
@@ -1872,6 +1873,63 @@ void check(TranslationUnit& unit) {
         script.body = std::move(unit.scripts);
         Checker{unit.fileName, sigs, script, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, structs, {}, {}}.run();
         unit.scripts = std::move(script.body);
+    }
+
+    // VERIFY_FORALL (main-spec §9.3): the body is checked as `bool f(binders) { return body; }`.
+    std::set<std::string> theoremNames;
+    for (Verify& v : unit.verifies) {
+        int bits = 0;
+        for (const auto& b : v.binders) {
+            const Type& t = b.first;
+            if (t.kind != Type::Kind::BitVec && t.kind != Type::Kind::UInt && t.kind != Type::Kind::SInt &&
+                t.kind != Type::Kind::Bool)
+                fail(unit.fileName, v.loc, "`VERIFY_FORALL` over a `" + cName(t) + "` (`" + b.second + "`)",
+                     "the theorem is proved by `bv_decide`, a SAT search over finitely many bits; `" + cName(t) +
+                         "` has no fixed width.",
+                     "quantify over `bv(N)`, `uintN_t`/`intN_t` or `bool`.");
+            bits += t.kind == Type::Kind::Bool ? 1 : t.width;
+        }
+        Function f;
+        f.name = "<VERIFY_FORALL>";
+        f.defLine = v.line;
+        f.retType = Type::of(Type::Kind::Bool);
+        f.params = v.binders;
+        Stmt ret;
+        ret.kind = Stmt::Kind::Return;
+        ret.loc = v.body.loc;
+        ret.expr = std::move(v.body);
+        f.body.push_back(std::move(ret));
+        Checker{unit.fileName, sigs, f, unit.pragmas, unit.notes, writers, unit.helpers, enumConsts, structs, {}, {}}.run();
+        v.body = std::move(f.body[0].expr);
+        bool io = false;
+        std::function<void(const Expr&)> scan = [&](const Expr& e) {
+            io = io || (e.kind == Expr::Kind::Call && e.io);
+            for (const Expr& kid : e.kids) scan(kid);
+        };
+        scan(v.body);
+        if (io)
+            fail(unit.fileName, v.loc, "`VERIFY_FORALL` calls an I/O function",
+                 "a theorem is about values; an `IO` action has none to compare.", "verify the pure functions.");
+        if (!v.named) {  // `f(…) == g(…)` → `f_eq_g`, else `verify_LINE`
+            const Expr& b = v.body;
+            const bool eq = b.kind == Expr::Kind::Cmp && b.text == "==";
+            auto callee = [](const Expr& e) {
+                const Expr* p = &e;
+                while (p->kind == Expr::Kind::Cast && p->implicit) p = &p->kids[0];
+                return p->kind == Expr::Kind::Call && !p->lib ? p->text : std::string();
+            };
+            const std::string l = eq ? callee(b.kids[0]) : "", r = eq ? callee(b.kids[1]) : "";
+            v.name = !l.empty() && !r.empty() && l != r ? l + "_eq_" + r : "verify_" + std::to_string(v.line);
+        }
+        if (sigs.count(v.name) || !theoremNames.insert(v.name).second)
+            fail(unit.fileName, v.loc, "the theorem name `" + v.name + "` is already taken",
+                 "Lean allows one declaration per name.", "name the theorem with a label: `my_name: VERIFY_FORALL(…)`.");
+        if (bits > 64)  // W012: shown whenever the feature is used (main-spec §13.1)
+            unit.notes.push_back(DiagError(
+                "W012", unit.fileName, v.loc,
+                "`VERIFY_FORALL` ranges over " + std::to_string(bits) + " bits",
+                "`bv_decide` searches all of them; above 64 the SAT problem can take very long.",
+                "split the check, or narrow the variables."));
     }
 
     for (const std::string& h : helperClosure(unit.helpers))  // a generated helper's name must be free

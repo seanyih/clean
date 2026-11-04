@@ -19,7 +19,7 @@ come with `--lint=c-semantics` (W001–W011, W014 and W004, W006, plus the provi
 features that trigger them. Each lint is reported once per kind per file: the
 first place, plus a count of the others. A lint never changes the translation
 or the exit code (decision D18; `src/lint.cpp`). Not built because their
-feature does not exist yet: W003 (`long double`), W012, W013.
+feature does not exist yet: W003 (`long double`), W013 (`--prove=none`).
 
 **E000 — the build's placeholder, not a catalogue code.** Every refusal that
 has no permanent number yet is reported as E000. Two flavours:
@@ -85,7 +85,7 @@ Status legend: ✅ emitted today (file that throws it) · ⚠️ partial ·
 | W009 | lint          | `Int.toNat` clamps negative values                                                                    | —                                                                          | ✅ lint.cpp (`Int`/`intN_t` → `Nat`/`char`, inserted or written; also an `int` used as an index) |
 | W010 | lint          | `a[i]!` can panic                                                                                     | `--index=proof`                                                            | ✅ lint.cpp (`a[i]` reads, and element writes: `set!` ignores a bad index) |
 | W011 | lint          | string indexing is O(n)                                                                               | `Array Char`                                                               | ✅ lint.cpp |
-| W012 | warning       | verification domain > 64 bits                                                                        | split                                                                      | ❌ no verification constructs yet                                                                    |
+| W012 | warning       | verification domain > 64 bits                                                                        | split                                                                      | ✅ check.cpp (`VERIFY_FORALL`; shown whenever the feature is used, `test/cases-lint/verify_wide.c`) |
 | W013 | warning       | `sorry` emitted by `--prove=none`                                                                    | —                                                                          | ❌ no `--prove` flag exists                                                                           |
 | W014 | lint          | `/` or `%` on `Int` rounds differently from C when an operand is negative (Euclidean vs truncating) — added with D18 | non-negative operands, or `unsigned`; C's truncating division is not emitted | ✅ lint.cpp |
 | W015 | lint (provisional) | `scanf`/`fscanf` read whole whitespace-separated words and consume the whitespace after them; C stops at the first unusable character and leaves the rest | one value per word; read lines with `fgets` | ✅ lint.cpp (slice 9; awaiting the human's confirmation, open-decisions.md) |
