@@ -28,3 +28,6 @@ W011  c_semantics.c:25:38  indexing a string is O(n)
 W004  c_semantics.c:28:24  `z` has no initial value and starts at 0
       why:  C leaves an uninitialised local indeterminate; Lean has no such thing, so clean starts it at zero (main-spec §4.5).
       fix:  initialise it: `int z = …;`.
+W003  c_semantics.c:31:1  `long double` is Lean's `Float`, a 64-bit double  (+1 more in this file)
+      why:  C's `long double` is often wider (80 or 128 bits); clean maps it to `Float` (main-spec §4.1).
+      fix:  write `double` if 64 bits are enough; Lean has no wider float.

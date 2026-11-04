@@ -206,6 +206,10 @@ void lint(TranslationUnit& unit) {
         L.stmts(f.body);
         forEachExpr(f.body, [&](const Expr& e) { L.expr(e); });
     }
+    for (const Loc& at : unit.longDoubles)
+        L.report("W003", at, "`long double` is Lean's `Float`, a 64-bit double",
+                 "C's `long double` is often wider (80 or 128 bits); clean maps it to `Float` (main-spec §4.1).",
+                 "write `double` if 64 bits are enough; Lean has no wider float.");
     L.stmts(unit.scripts);  // file-scope printf (§8.2)
     forEachExpr(unit.scripts, [&](const Expr& e) { L.expr(e); });
     for (auto& entry : L.hits) {

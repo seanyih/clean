@@ -302,5 +302,6 @@ struct TranslationUnit {
     std::vector<Verify> verifies;       // VERIFY_FORALL theorems (main-spec §9), emitted after the functions
     std::vector<std::string> leanDeclsBefore;  // `LEAN_DECL("…")` above every function: after the types, before them
     std::vector<std::string> leanDeclsAfter;   // `LEAN_DECL("…")` below a function: at the end (main-spec §11.1)
+    std::vector<Loc> longDoubles;       // where `long double` was written: it is `Float`, 64 bits (lint W003)
     std::set<std::string> helpers;      // generated Lean helpers the file needs, e.g. "hexOf" (check.cpp; prelude.h)
 };

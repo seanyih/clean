@@ -554,8 +554,11 @@ expression; the `for`-header comma), **E105** (switch fall-through), **E110**
 (`++`/`--` in an expression), **E301** (bit-width mismatch), **E302**
 (bit-vector width not a constant), **E303** (bitwise on `int`), **H004**
 (bitwise on `char`), **E101** (pointers outside §4.6, string
-mutation), **H001** (`bool` array hint), **W006** (`printf` formatting
-simplified) follow the catalogue
+mutation, `->`), **E104** (`union`), **E106** (mutable globals, `static`
+locals), **E107** (function pointers), **E108** (`malloc`/`free`), **E109**
+(`volatile`, `register`, `asm`, `...`, `setjmp`), **E111** (bit-fields),
+**E112** (`sizeof`), **E113** (`_Atomic`, `_Thread_local`), **H001** (`bool`
+array hint), **W003**–**W016** (lints; W012 with `VERIFY_FORALL`) follow the catalogue
 in spec/error-codes.md, which also tracks which codes are implemented.
 **E000** is the placeholder for everything else ("not in the current
 build"); real codes arrive with the features they guard.

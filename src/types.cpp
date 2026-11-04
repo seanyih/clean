@@ -29,8 +29,25 @@ const std::set<std::string> kSupported = {
 // yet: a pointed refusal beats "expected a declaration".
 const std::set<std::string> kRefused = {
     "union", "static",
-    "volatile", "register", "_Atomic",
+    "volatile", "register", "_Atomic", "_Thread_local",
     "__int128", "int128_t", "uint128_t", "_Float16",
+};
+
+// The catalogue code and reason for the refused words that have one (main-spec §4.5, §4.7, §13.2).
+struct Refusal {
+    const char* code;
+    const char* why;
+    const char* fix;
+};
+const std::map<std::string, Refusal> kRefusalCodes = {
+    {"union", {"E104", "a union reads one value's bits as another type; Lean values have no shared storage "
+                       "(main-spec §4.5).",
+               "use `bv(N)` and take the parts with `bv_ext` / build it with `bv_cat`."}},
+    {"volatile", {"E109", "`volatile` speaks about memory that changes behind the program's back; Lean values never do.",
+                  "remove it."}},
+    {"register", {"E109", "`register` is a storage hint with no Lean counterpart (main-spec §4.7).", "remove it."}},
+    {"_Atomic", {"E113", "atomics are about threads sharing memory, which pure Lean values do not.", "remove it."}},
+    {"_Thread_local", {"E113", "thread-local storage presumes threads and mutable globals.", "remove it."}},
 };
 
 // Words refused for good, with the reason (main-spec §4.1 ⛔ rows).
@@ -231,6 +248,12 @@ TypeResolution resolveTypeWords(const std::vector<std::string>& allWords) {
         if (never != kNever.end())
             return bad("type `" + spelled + "` has no Lean counterpart", never->second,
                        "use " + supportedTypesHint() + ".");
+        auto coded = kRefusalCodes.find(w);
+        if (coded != kRefusalCodes.end()) {
+            TypeResolution r = bad("`" + w + "` is not translatable", coded->second.why, coded->second.fix);
+            r.code = coded->second.code;
+            return r;
+        }
         if (classifyTypeWord(w) == TypeWord::Refused)
             return bad("type `" + spelled + "` is not translated in this slice",
                        "`" + w + "` exists in the main spec but is not translated yet; the type "

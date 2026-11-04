@@ -764,10 +764,17 @@ struct Checker {
             if (it != sigs.end() && it->second.global)
                 fail(file, e.loc, "the constant `" + e.text + "` is called like a function",
                      "it is a value, not a function.", "drop the `(…)`.");
+            if (it == sigs.end() && (e.text == "malloc" || e.text == "calloc" || e.text == "realloc" || e.text == "free"))
+                failDiag("E108", e.loc, "dynamic memory (`" + e.text + "`) is not translatable",
+                         "Lean values are immutable; there is no heap model (main-spec §12.2).",
+                         "declare an array of fixed size (`int a[8];`) and index it.");
+            if (it == sigs.end() && (e.text == "setjmp" || e.text == "longjmp"))
+                failDiag("E109", e.loc, "`" + e.text + "` is not translatable",
+                         "a non-local jump has no Lean counterpart.", "return an error value instead.");
             if (it == sigs.end())
                 fail(file, e.loc, "`" + e.text + "` is called but not defined in this file",
-                     "calls are resolved inside the file; `extern` declarations come later.",
-                     "define `" + e.text + "` in the same file.");
+                     "calls are resolved inside the file (D5: an unknown name is not guessed).",
+                     "define `" + e.text + "` in the same file, or declare it `extern` if Lean defines it (§7.2.1).");
             if (it->second.params.size() != e.kids.size())
                 fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(it->second.params.size()) +
                          " argument(s) but is called with " + std::to_string(e.kids.size()),

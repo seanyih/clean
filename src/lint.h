@@ -9,7 +9,7 @@
 // Off by default; main.cpp runs it for `--lint=c-semantics`. Each lint is
 // reported once per kind per file (first place, plus a count of the rest).
 //
-//   W004  an uninitialised scalar local starts at zero (main-spec §4.5)
+//   W003  `long double` is `Float` (64 bits)        W004  an uninitialised scalar local starts at zero
 //   W001  `int`-family is unbounded `Int`            W008  exact-width arithmetic, no `int` promotion
 //   W002  `Nat` subtraction truncates at 0           W009  `Int` → `Nat` clamps negative values
 //   W005  division by zero is 0                      W010  `a[i]!` can panic
@@ -19,8 +19,7 @@
 //   W015  `scanf`/`fscanf` read whole words and consume the whitespace after them (provisional)
 //   W016  `fopen` that fails stops the program, it does not return NULL (provisional)
 //
-// W003 needs a feature that does not exist yet (`long double` is spelled
-// away by the parser).
+// W012 (VERIFY_FORALL > 64 bits) is reported by check.cpp, always: it comes with the feature.
 
 #pragma once
 

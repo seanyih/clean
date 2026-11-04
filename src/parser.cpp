@@ -113,6 +113,7 @@ struct Parser {
     std::map<std::string, Type> structTags;  // `struct Tag { … }` seen so far: Tag → its type
     bool typeBodies = false;               // file scope: `enum … { … }` may be defined here
     std::vector<TypeDecl> newDecls;        // type declarations met while parsing one file-scope item
+    std::vector<Loc> longDoubles;          // where `long double` was written (lint W003)
 
     // An integer literal's value (`7`, `0x1F`, `0b11`).
     static long long literalValue(const std::string& t) {
@@ -440,6 +441,12 @@ struct Parser {
         if (isBitVecWord(peek().text)) return parseBitVec();
         std::vector<std::string> words;
         while (atTypeWord() && !isBitVecWord(peek().text)) words.push_back(toks[i++].text);
+        bool isLong = false, isDouble = false;
+        for (const std::string& w : words) {
+            isLong = isLong || w == "long";
+            isDouble = isDouble || w == "double";
+        }
+        if (isLong && isDouble) longDoubles.push_back(at);  // `long double` → `Float` (lint W003)
         TypeResolution r = resolveTypeWords(words);
         if (!r.ok) failCode(r.code.c_str(), file, at, r.problem, r.why, r.fix);
         return r.type;
@@ -503,6 +510,12 @@ struct Parser {
             lhs = std::move(e);
         }
         return lhs;
+    }
+
+    [[noreturn]] void failFunctionPointer() {
+        failCode("E107", file, peek().loc, "a function pointer",
+                 "function values are ⛔ in v0.1 (main-spec §4.6; 🟡 as function-typed parameters).",
+                 "call the function by name, or pass a value that selects it (an `enum`) and `switch` on it.");
     }
 
     [[noreturn]] void failArrow() {
@@ -655,6 +668,10 @@ struct Parser {
         if (t.kind == Token::Kind::Ident && t.text == "BV" && peek2().kind == Token::Kind::Punct &&
             peek2().text == "(")
             return parseBvLiteral();
+        if (t.kind == Token::Kind::Ident && (t.text == "sizeof" || t.text == "_Alignof" || t.text == "alignof"))
+            failCode("E112", file, t.loc, "`" + t.text + "` is not translated",
+                     "sizes are a property of C's memory layout; Lean arrays carry their length instead.",
+                     "pass the size explicitly (`int a[], size_t n`), or use the `#define` of the size.");
         if (t.kind == Token::Kind::Ident && t.text == "LEAN_EXPR" && peek2().kind == Token::Kind::Punct &&
             peek2().text == "(") {
             Expr e;
@@ -1379,6 +1396,7 @@ struct Parser {
         Stmt s;
         Loc typeAt = peek().loc;
         Type base = parseCType();
+        if (isPunct("(") && isPunctAt(i + 1, "*")) failFunctionPointer();
         int stars = parseStars();
         Token name = expectName("a variable name");
         checkName(name);
@@ -1388,6 +1406,11 @@ struct Parser {
         if (base.kind == Type::Kind::Unit && stars == 0)
             fail(file, typeAt, "a variable of type `void`", "`void` has no values.", "use a real type.");
         while (isPunct("[")) s.dims.push_back(parseArraySize());
+        if (stars && isPunct("=") && toks[i + 1].kind == Token::Kind::Ident &&
+            (toks[i + 1].text == "malloc" || toks[i + 1].text == "calloc" || toks[i + 1].text == "realloc"))
+            failCode("E108", file, toks[i + 1].loc, "dynamic memory (`" + toks[i + 1].text + "`) is not translatable",
+                     "Lean values are immutable; there is no heap model (main-spec §14.5).",
+                     "declare `" + cName(base) + " " + name.text + "[N];` (an Array) and index it.");
         s.type = declare(base, stars, s.dims.size(), typeAt, false);
         if (isPunct(","))
             fail(file, peek().loc, "several variables in one declaration",
@@ -1468,6 +1491,9 @@ struct Parser {
             s.kind = Stmt::Kind::Continue;
             return s;
         }
+        if (w == "asm" || w == "__asm__" || w == "__asm")
+            failCode("E109", file, peek().loc, "inline assembly is not translatable",
+                     "machine code has no Lean meaning (main-spec Appendix A).", "write it in C.");
         if (w == "LEAN_STMT" && peek2().kind == Token::Kind::Punct && peek2().text == "(") {
             s.kind = Stmt::Kind::Raw;
             s.name = parseRawLean("LEAN_STMT");
@@ -1598,7 +1624,12 @@ struct Parser {
         std::vector<std::pair<size_t, Loc>> pointers;  // `T *a` parameters: they need a length after them
         while (true) {
             Loc at = peek().loc;
+            if (isPunct(".") && isPunctAt(i + 1, ".") && isPunctAt(i + 2, "."))
+                failCode("E109", file, at, "a variadic function (`...`)",
+                         "Lean functions take a fixed list of arguments; only the `printf` family is translated.",
+                         "take the arguments explicitly, or an array.");
             Type base = parseCType();
+            if (isPunct("(") && isPunctAt(i + 1, "*")) failFunctionPointer();
             int stars = parseStars();
             Token name;  // a prototype may leave it out (`int f(int);`); a definition may not (checked by the caller)
             name.loc = peek().loc;
@@ -1778,7 +1809,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             toks.push_back(t);
     }
 
-    Parser p{toks, comments, definedNames, definedValues, fileName, 0, 0, {}, {}, {}, false, {}};
+    Parser p{toks, comments, definedNames, definedValues, fileName, 0, 0, {}, {}, {}, false, {}, {}};
     TranslationUnit unit;
     unit.fileName = fileName;
 
@@ -1957,6 +1988,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             continue;
         }
         retType = p.declare(retType, stars, 0, retAt, false);
+        if (p.isPunct("(") && p.isPunctAt(p.i + 1, "*")) p.failFunctionPointer();
         p.expectPunct("(", "to open the parameter list of `" + name.text + "`");
         auto params = p.parseParams(name.text == "main");
         p.expectPunct(")", "to close the parameter list of `" + name.text + "`");
@@ -1997,5 +2029,6 @@ TranslationUnit parse(const std::vector<Token>& tokens,
         unit.functions.push_back(std::move(f));
         pending.clear();
     }
+    unit.longDoubles = std::move(p.longDoubles);
     return unit;
 }

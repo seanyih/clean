@@ -26,3 +26,6 @@ char nth(char *s, size_t i) { return s[i]; }
 
 // W004: an uninitialised local starts at zero
 int zeroed(void) { int z; return z; }
+
+// W003: `long double` is a 64-bit `Float`
+long double wide(long double x) { return x * 2.0; }
