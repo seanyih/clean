@@ -1465,6 +1465,12 @@ void check(TranslationUnit& unit) {
                  "clean translates calls to `" + f.name + "` as the C library function (main-spec §8.1), "
                  "so a function of that name would never be called.",
                  "rename the function.");
+    for (const TypeDecl& d : unit.typeDecls)  // a Lean type and a Lean function cannot share a name
+        for (const Function& f : unit.functions)
+            if (f.name == d.name)
+                fail(unit.fileName, Loc{f.defLine, 1}, "`" + f.name + "` names both a type and a function",
+                     "Lean has one namespace for both, so the two definitions would clash.",
+                     "rename one of them.");
     prepareMain(unit);  // `int main` → `IO UInt32`, before the signatures are taken
     findIO(unit);       // which functions are `IO`
     std::map<std::string, Sig> sigs;

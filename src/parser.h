@@ -5,7 +5,8 @@
 // TranslationUnit (syntax only: whether names exist etc. is check.h). The format of a
 // printf is cut up by format.h. Grammar:
 //
-//   file      :=  ( comment | ';' | prototype | function | print )*  EOF
+//   file      :=  ( comment | ';' | typedef | prototype | function | print )*  EOF
+//   typedef   :=  'typedef' type '*'* IDENT ';'          (main-spec §4.5)
 //   prototype :=  type IDENT '(' params ')' ';'
 //   function  :=  attr* type IDENT '(' params ')' block
 //   attr      :=  '[[' 'lean' '::' 'partial' ']]'
@@ -32,7 +33,8 @@
 //              |  ('puts' | 'putchar') '(' expr ')' ';'
 //   body      :=  block | stmt
 //   group     :=  ( 'case' ['-'] INTLIT ':' | 'default' ':' )+ stmt*
-//   expr      :=  C precedence:  ||  &&  |  ^  &  == !=  < <= > >=  << >>  + -  * / %
+//   expr      :=  cond '?' expr ':' expr   (right-associative)  |  cond
+//   cond      :=  C precedence:  ||  &&  |  ^  &  == !=  < <= > >=  << >>  + -  * / %
 //                 unary - ! ~  and the cast '(' type ')' unary
 //   primary   :=  INTLIT | FLOATLIT | CHARLIT | true | false | IDENT | IDENT '(' args ')'
 //              |  'BV' '(' width ',' INTLIT ')'  | '(' expr ')'

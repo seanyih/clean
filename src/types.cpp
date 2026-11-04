@@ -28,7 +28,7 @@ const std::set<std::string> kSupported = {
 // C type and storage words that exist in the main spec but are not built
 // yet: a pointed refusal beats "expected a declaration".
 const std::set<std::string> kRefused = {
-    "struct", "union", "enum", "typedef", "static", "extern",
+    "struct", "union", "enum", "static", "extern",
     "inline", "volatile", "register", "_Atomic",
     "__int128", "int128_t", "uint128_t", "_Float16",
 };
@@ -136,6 +136,7 @@ bool isString(Type t) { return t.kind == Type::Kind::String; }
 bool isFile(Type t) { return t.kind == Type::Kind::File; }
 
 std::string leanName(Type t) {
+    if (!t.alias.empty()) return t.alias;  // a `typedef` name: `abbrev byte := BitVec 8`
     switch (t.kind) {
     case Type::Kind::Literal:      return "Int";  // a literal with no context defaults to Int
     case Type::Kind::FloatLiteral: return "Float";
@@ -157,6 +158,7 @@ std::string leanName(Type t) {
 }
 
 std::string cName(Type t) {
+    if (!t.alias.empty()) return t.alias;
     switch (t.kind) {
     case Type::Kind::Literal:      return "int";
     case Type::Kind::FloatLiteral: return "double";

@@ -102,6 +102,7 @@ struct Parser {
     const std::string& file;
     size_t i = 0;
     size_t nextComment = 0;  // first comment not handed out yet
+    std::map<std::string, Type> typedefs;  // `typedef T name;` seen so far: name → T (its `alias` = name)
 
     const Token& peek() const { return toks[i]; }
     const Token& peek2() const { return toks[i + 1]; }  // safe unless peek() is End
@@ -154,10 +155,21 @@ struct Parser {
                  "rename the identifier in the C source.");
     }
 
-    // Is the next token a word of a C type (supported or not yet translated)?
-    bool atTypeWord() const {
+    // Is token `j` a word of a C type (supported or not yet translated), or a
+    // `typedef` name?
+    bool isTypeToken(size_t j) const {
+        return toks[j].kind == Token::Kind::Ident &&
+               (classifyTypeWord(toks[j].text) != TypeWord::NotAType || typedefs.count(toks[j].text));
+    }
+    bool atTypeWord() const { return isTypeToken(i); }
+
+    // Does a declaration start here: a type clean translates, or a `typedef` name?
+    bool atDeclStart() const {
         return peek().kind == Token::Kind::Ident &&
-               classifyTypeWord(peek().text) != TypeWord::NotAType;
+               (classifyTypeWord(peek().text) == TypeWord::Supported || typedefs.count(peek().text));
+    }
+    static bool isQualifier(const Token& t) {
+        return t.kind == Token::Kind::Ident && (t.text == "const" || t.text == "restrict");
     }
 
     // The `N` of `bv(N)` / `BV(N, v)`: an integer literal, or a
@@ -243,6 +255,13 @@ struct Parser {
                      "only " + supportedTypesHint() + " are translated in this slice.",
                      "write " + supportedTypesHint() + "; the type table grows slice by slice.");
         Loc at = peek().loc;
+        size_t j = i;  // `const byte`, `byte const`: qualifiers around a typedef name are ignored (§4.7)
+        while (isQualifier(toks[j])) ++j;
+        if (toks[j].kind == Token::Kind::Ident && typedefs.count(toks[j].text)) {
+            i = j + 1;
+            while (isQualifier(peek())) ++i;
+            return typedefs.at(toks[j].text);
+        }
         if (isBitVecWord(peek().text)) return parseBitVec();
         std::vector<std::string> words;
         while (atTypeWord() && !isBitVecWord(peek().text)) words.push_back(toks[i++].text);
@@ -319,8 +338,7 @@ struct Parser {
 
     Expr parseUnary() {
         if (isPunct("++") || isPunct("--")) failIncDec();
-        if (isPunct("(") && peek2().kind == Token::Kind::Ident &&
-            classifyTypeWord(peek2().text) != TypeWord::NotAType) {  // a cast `(T)x`
+        if (isPunct("(") && isTypeToken(i + 1)) {  // a cast `(T)x`
             Loc at = peek().loc;
             ++i;
             Type target = parseCType();
@@ -819,8 +837,7 @@ struct Parser {
         ++i;  // `for`
         expectPunct("(", "after `for`");
         if (!isPunct(";")) {  // the initialiser: a declaration, an assignment or a call
-            if (peek().kind == Token::Kind::Ident &&
-                classifyTypeWord(peek().text) == TypeWord::Supported)
+            if (atDeclStart())
                 s.init.push_back(parseDeclTail());  // eats the `;` that separates the parts
             else if (atAssignment()) {
                 Stmt a = parseAssignment(false);
@@ -1147,7 +1164,7 @@ struct Parser {
             expectPunct(";", "after the return expression");
             return s;
         }
-        if (classifyTypeWord(w) == TypeWord::Supported) return parseDeclTail();
+        if (atDeclStart()) return parseDeclTail();
         if (w == "if") return parseIf();
         if (w == "switch") return parseSwitch();
         if (w == "while") return parseWhile();
@@ -1344,6 +1361,43 @@ struct Parser {
              "main-spec §3.1 lists partial, inline, nosynth, name.", "fix the spelling.");
     }
 
+    // `typedef T name;` at file scope (main-spec §4.5) → `abbrev name := T`. The
+    // name becomes a type word for the rest of the file; values of the type
+    // keep its name (`Type::alias`), so the output reads `byte`, not `BitVec 8`.
+    TypeDecl parseTypedef(std::vector<Comment> comments) {
+        TypeDecl d;
+        d.kind = TypeDecl::Kind::Alias;
+        d.line = peek().loc.line;
+        d.comments = std::move(comments);
+        ++i;  // `typedef`
+        Loc at = peek().loc;
+        Type base = parseCType();
+        int stars = parseStars();
+        Token name = expectName("the name the `typedef` introduces");
+        checkName(name);
+        if (isPunct("["))
+            failHere("a `typedef` of an array type is not translated",
+                     "the size is not part of a Lean `Array` type (D13), so the name would lose it.",
+                     "declare the arrays with their size, or typedef the element type.");
+        if (isPunct("("))
+            failCode("E107", file, peek().loc, "a `typedef` of a function type",
+                     "function pointers are ⛔ in v0.1 (main-spec §4.6).", "pass a named function instead.");
+        Type t = declare(base, stars, 0, at, false);
+        if (t.kind == Type::Kind::Unit)
+            fail(file, at, "a `typedef` of `void`", "`void` has no values to name.", "use a real type.");
+        expectPunct(";", "after the `typedef`");
+        if (typedefs.count(name.text))
+            fail(file, name.loc, "`" + name.text + "` is defined twice by `typedef`",
+                 "Lean allows only one definition per name.", "rename one of them.");
+        d.name = name.text;
+        d.loc = name.loc;
+        d.type = t;        // what the abbreviation stands for (printed with its own name, if it has one)
+        t.alias = name.text;
+        typedefs[name.text] = t;
+        for (Comment& c : takeComments(i, false)) d.comments.push_back(std::move(c));
+        return d;
+    }
+
     // The `int`, the name, the parameter list are already consumed by the caller.
     Function parseFunction(std::string name, int defLine,
                            std::vector<std::pair<Type, std::string>> params,
@@ -1383,7 +1437,7 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             toks.push_back(t);
     }
 
-    Parser p{toks, comments, definedNames, definedValues, fileName, 0};
+    Parser p{toks, comments, definedNames, definedValues, fileName, 0, 0, {}};
     TranslationUnit unit;
     unit.fileName = fileName;
 
@@ -1406,6 +1460,11 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             pending.clear();
             for (Comment& c : p.takeComments(p.i, false)) st.comments.push_back(std::move(c));
             unit.scripts.push_back(std::move(st));
+            continue;
+        }
+        if (p.isIdent("typedef")) {  // main-spec §4.5
+            unit.typeDecls.push_back(p.parseTypedef(std::move(pending)));
+            pending.clear();
             continue;
         }
         bool isPartial = false;

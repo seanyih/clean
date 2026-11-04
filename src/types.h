@@ -36,6 +36,8 @@ struct Type {
     Kind kind = Kind::Int;
     int width = 0;            // SInt/UInt: 8 16 32 64; BitVec: N; otherwise 0
     std::vector<Type> args;   // Array: the element type, as args[0]
+    std::string alias;        // the `typedef` name this type was written with (`byte`): printed instead of
+                              // the Lean type, ignored by `==` (an `abbrev` is the type it abbreviates)
 
     bool operator==(const Type& o) const { return kind == o.kind && width == o.width && args == o.args; }
     bool operator!=(const Type& o) const { return !(*this == o); }

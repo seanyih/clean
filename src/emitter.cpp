@@ -836,6 +836,16 @@ std::string emit(const TranslationUnit& unit) {
     out += "set_option autoImplicit false\n";
     out += helperDefinitions(helperClosure(unit.helpers));  // only the helpers the file uses
 
+    for (const TypeDecl& d : unit.typeDecls) {  // types first, in source order (main-spec §4.5)
+        out += "\n-- c: " + unit.fileName + ":" + std::to_string(d.line) + "\n";
+        emitComments(d.comments, "", out);
+        switch (d.kind) {
+        case TypeDecl::Kind::Alias:
+            out += "abbrev " + d.name + " := " + leanName(d.type) + "\n";
+            break;
+        }
+    }
+
     size_t i = 0;
     while (i < unit.functions.size()) {
         const Function& f = unit.functions[i];

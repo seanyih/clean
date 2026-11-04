@@ -95,7 +95,7 @@ branch makes both `bool`), the chain is right-associative like C's, and the
 `if` is parenthesised wherever Lean would otherwise extend it. An I/O call in
 a branch is refused: C runs only the chosen branch, `(← f x)` would run first.
 
-**Types** (main-spec §4.1, §4.3, §4.4; structs/enums/typedefs are not built):
+**Types** (main-spec §4.1, §4.3, §4.4, §4.5):
 
 | C                                                         | Lean                          |
 | --------------------------------------------------------- | ----------------------------- |
@@ -113,8 +113,21 @@ a branch is refused: C runs only the chosen branch, `(← f x)` would run first.
 | `T a[M][N]`, `T m[][N]`                                   | `Array (Array T)`             |
 | `void` (a return type)                                    | `Unit`                        |
 
+| `typedef T name;` (file scope)                            | `abbrev name := T`            |
+
 `const` and `restrict` are ignored (§4.7). Every expression has a type
 (`Expr::type`, set by the checker).
+
+**File-scope types** (main-spec §4.5). They are printed in source order
+before every function, each with its `-- c: file:LINE` (C declares a type
+before using it, so source order is already Lean's). `typedef T name;` is
+`abbrev name := T`; the name is a type word for the rest of the file, and
+values keep it — the output says `byte`, not `BitVec 8` (`Type::alias`,
+ignored by `==`: an `abbrev` *is* its type, so mixing, casts and merged
+parameters see through it). `T` may be any type above, a pointer form
+included (`typedef const char *text;`). Refused: a typedef of an array (the
+size would be lost, D13), of a function type (E107), of `void`; a name used
+twice; a type and a function of the same name (Lean has one namespace).
 
 **Mixed types (D19).** When two operands differ, the conversion of main-spec
 §5.3 is inserted for the one of lower rank, so the output always shows it:
@@ -358,7 +371,7 @@ cannot (see `cases-lean-rejects`).
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
 `goto` and labels (**E102** — permanent, main-spec §6), structs, enums,
-typedefs, unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
+unions, `static`/`extern`/`inline`, the §5.4 bit-vector helpers
 (`bv_cat` …), the `<string.h>` helpers, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
@@ -572,8 +585,8 @@ missing). Last full run **with Lean 4.35.0**: 2026-10-24, after merging slice 9
    before the loop and at its end); `atoi`/`strtol` (§12.2). (The
    uninitialised scalar local, `int n; scanf("%d", &n);`, is done: it starts
    at the type's zero, main-spec §4.5, lint W004.)
-3. Structs, enums, typedefs (§4.5): they need file-scope declarations in the
-   AST, which is the next structural step. Also unlocks `switch` on enums.
+3. Structs, enums (§4.5): typedefs landed the file-scope declarations
+   (`TranslationUnit::typeDecls`); enums also unlock `switch` on enums.
 3. The §5.4 bit-vector helpers (`bv_cat`, `bv_ext`, `bv_zext`, …) — they also
    give E301 its fix — and the `<string.h>` helpers (§12.3).
 4. Writer extensions if wanted: `fill(m[i], n)` (write back into a row), and

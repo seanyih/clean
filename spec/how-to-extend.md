@@ -112,7 +112,7 @@ update impl-spec.md (the types table) and error-codes.md.
 
 | Feature (main-spec)                  | Hook                                                                      |
 | ------------------------------------ | ------------------------------------------------------------------------- |
-| typedefs, structs, enums (§4.5)      | file-scope declarations in `TranslationUnit` + `toposort.cpp` ordering; a `Type::Kind` that carries a name (`Type` already has `args`; add a name field, update `operator==`) |
+| structs, enums (§4.5)                | a `TypeDecl::Kind` (ast.h; typedefs are the worked example: `Parser::parseTypedef`, the `typeDecls` loop in `emit`), and a `Type::Kind` that carries a name (add it to `operator==`; `alias` is deliberately left out of it) |
 | `printf` / `IO` (§8)                 | purity inference (D7) in `emitFunction`; makes `void` functions observable |
 | `bv_*` helpers (§5.4)                | calls to known names in `check.cpp` `Call`; signatures in types.cpp       |
 | `<string.h>` helpers (§12.3)         | same: known names in `Call`, `String` arguments                           |

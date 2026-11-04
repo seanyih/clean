@@ -218,9 +218,24 @@ struct Function {
     int mutualGroup = -1;               // ≥ 0: member of a `mutual … end` block with this id (toposort.cpp)
 };
 
+// A file-scope type declaration (main-spec §4.5), emitted in source order
+// before every function (C declares a type before its first use, so source
+// order is already Lean's order).
+//   Alias   `typedef T name;` → `abbrev name := T`   (type = T)
+struct TypeDecl {
+    enum class Kind { Alias };
+    Kind kind = Kind::Alias;
+    std::string name;
+    Type type;
+    std::vector<Comment> comments;  // above the declaration, and inside it
+    int line = 0;                   // D9: `-- c: file:LINE`
+    Loc loc;                        // the name, for diagnostics
+};
+
 // One translated file.
 struct TranslationUnit {
     std::string fileName;               // base name, e.g. "arith.c", used in comments
+    std::vector<TypeDecl> typeDecls;    // typedefs …, source order (main-spec §4.5)
     std::vector<Function> functions;    // parser: source order; after sortDefinitions(): callees first
     std::set<std::string> pragmas;      // `#pragma lean NAME` words (set by main from the lexer)
     std::vector<DiagError> notes;       // hints (H…) found by check.cpp; main prints them, they never stop the build
