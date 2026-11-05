@@ -645,6 +645,14 @@ struct Checker {
         case Expr::Kind::StringLit:
             return Type::of(Type::Kind::String);
         case Expr::Kind::ArrayLit:
+            if (e.compound) {  // `(T){ … }` (C99): a struct value built in place
+                if (e.type.kind != Type::Kind::Struct)
+                    fail(file, e.loc, "a compound literal of type `" + cName(e.type) + "`",
+                         "clean builds struct values in place; an array literal needs its declared size.",
+                         "declare the array as a local: `T a[N] = { … };`.");
+                structInit(e, e.type);
+                return e.type;
+            }
             fail(file, e.loc, "a `{ … }` list outside an array initialiser",
                  "main-spec §4.4 accepts it only as `T a[N] = { … };`.", "write the elements one by one.");
         case Expr::Kind::Index: {
@@ -824,7 +832,7 @@ struct Checker {
     Type stdCall(Expr& e) {
         const StdShape shape = stdShape(e.text);
         const size_t want = shape == StdShape::Math2 || shape == StdShape::MinMax || shape == StdShape::StrCmp ||
-                                    shape == StdShape::StrCat ? 2 : 1;
+                                    shape == StdShape::StrCat || shape == StdShape::StrCpy ? 2 : 1;
         if (e.kids.size() != want)
             fail(file, e.loc, "`" + e.text + "` takes " + std::to_string(want) + " argument(s) but is called with " +
                      std::to_string(e.kids.size()),
@@ -872,10 +880,13 @@ struct Checker {
             valueAs(e.kids[0], chr);  // C passes an `int`; Lean's tests take a `Char` (W007 for the conversion)
             return shape == StdShape::CharTest ? Type::of(Type::Kind::Bool) : chr;
         case StdShape::StrCat:
+        case StdShape::StrCpy:
         case StdShape::Assert:
             fail(file, e.loc, "the result of `" + e.text + "(…)` is used as a value",
                  shape == StdShape::StrCat ? "`strcat` changes its first argument; Lean strings are values, so it is "
                                              "translated as the statement `dst := dst ++ src`."
+                 : shape == StdShape::StrCpy ? "`strcpy` changes its first argument; Lean strings are values, so it is "
+                                               "translated as the statement `dst := src`."
                                            : "`assert` is a statement (`assert! c`).",
                  "call it as a statement, on its own line.");
         case StdShape::None:
@@ -1150,7 +1161,7 @@ struct Checker {
     // `f(args);` — the CallStmt case of `stmts`, also a `for` header part.
     void callStmt(Stmt& s) {
         const StdShape shape = sigs.count(s.expr.text) ? StdShape::None : stdShape(s.expr.text);
-        if (shape == StdShape::Assert || shape == StdShape::StrCat) {  // main-spec §12.3, §12.5
+        if (shape == StdShape::Assert || shape == StdShape::StrCat || shape == StdShape::StrCpy) {  // §12.3, §12.5
             Expr& e = s.expr;
             if (e.kids.size() != (shape == StdShape::Assert ? 1u : 2u))
                 fail(file, e.loc, "`" + e.text + "` is called with the wrong number of arguments",
@@ -1164,12 +1175,12 @@ struct Checker {
                 return;
             }
             if (e.kids[0].kind != Expr::Kind::Ident)
-                fail(file, e.kids[0].loc, "`strcat` appends to something that is not a variable",
-                     "the new string is assigned back, so it must be a whole variable.", "append to a string variable.");
+                fail(file, e.kids[0].loc, "`" + e.text + "` writes to something that is not a variable",
+                     "the new string is assigned back, so it must be a whole variable.", "write to a string variable.");
             valueAs(e.kids[0], Type::of(Type::Kind::String));
             valueAs(e.kids[1], Type::of(Type::Kind::String));
             markAssigned(e.kids[0].text, e.kids[0].loc);
-            s.writeBack = e.kids[0].text;  // `dst := dst ++ src`
+            s.writeBack = e.kids[0].text;  // `dst := dst ++ src` / `dst := src`
             return;
         }
         s.expr.type = valueType(s.expr);  // name, arity and arguments
@@ -1177,7 +1188,8 @@ struct Checker {
             fail(file, s.expr.loc, "the result of `" + s.expr.text + "(…)` is discarded",
                  "functions are pure in Lean; a discarded value does nothing "
                  "(effects arrive with `printf` and IO).",
-                 "use the value: `T r = " + s.expr.text + "(…);`.");
+                 fn.name == "<file scope>" ? "print it: `printf(\"%d\", " + s.expr.text + "(…));` is `#eval`."
+                                           : "use the value: `T r = " + s.expr.text + "(…);`.");
         auto w = writers.find(s.expr.text);
         if (w != writers.end()) {  // the callee is a writer: the array comes back (OD11 c)
             Expr& arg = s.expr.kids[(size_t)w->second];

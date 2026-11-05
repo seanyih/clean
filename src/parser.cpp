@@ -540,6 +540,13 @@ struct Parser {
                 failCode("E101", file, peek().loc, "a cast to a pointer type",
                          "main-spec §4.6 accepts no pointer casts.", "remove the cast.");
             expectPunct(")", "to close the cast");
+            if (isPunct("{")) {  // a compound literal `(Point){1.0, 2.0}` (C99, G6)
+                Expr lit = parseInitList();
+                lit.loc = at;
+                lit.type = target;
+                lit.compound = true;
+                return lit;
+            }
             Expr e;
             e.kind = Expr::Kind::Cast;
             e.type = target;
@@ -1366,12 +1373,13 @@ struct Parser {
         Stmt s;
         s.kind = Stmt::Kind::Close;
         s.loc = peek().loc;
-        ++i;  // `fclose`
-        expectPunct("(", "after `fclose`");
+        const std::string name = peek().text;  // `fclose` or `fflush`: both are `f.flush` in Lean
+        ++i;
+        expectPunct("(", "after `" + name + "`");
         s.hasStream = true;
         s.stream = parseExpr();
-        expectPunct(")", "to close the argument list of `fclose`");
-        expectPunct(";", "after `fclose(…)`");
+        expectPunct(")", "to close the argument list of `" + name + "`");
+        expectPunct(";", "after `" + name + "(…)`");
         return s;
     }
 
@@ -1879,6 +1887,25 @@ TranslationUnit parse(const std::vector<Token>& tokens,
             for (const Comment& c : pending) out += (c.block ? "/- " + c.text + " -/" : "-- " + c.text) + "\n";
             pending.clear();
             (unit.functions.empty() ? unit.leanDeclsBefore : unit.leanDeclsAfter).push_back(out + text);
+            continue;
+        }
+        if (p.peek().kind == Token::Kind::Ident && p.peek2().kind == Token::Kind::Punct &&
+            p.peek2().text == "(" && !isLibraryName(p.peek().text) &&
+            !p.isTypeToken(p.i)) {  // `countdown(3);` at file scope (G17); not `bv(8) f(…)`
+            Stmt st;
+            st.kind = Stmt::Kind::CallStmt;
+            st.loc = p.peek().loc;
+            st.expr = p.parseExpr();
+            if (st.expr.kind != Expr::Kind::Call)
+                p.failHere("a file-scope expression statement that is not a call",
+                           "only calls (and `printf`/`puts`/…) may stand at file scope; they become `#eval` (§8.2).",
+                           "wrap the computation in a function and call it, or print it with `printf`.");
+            p.expectPunct(";", "after the file-scope call");
+            st.script = true;
+            st.comments = std::move(pending);
+            pending.clear();
+            for (Comment& c : p.takeComments(p.i, false)) st.comments.push_back(std::move(c));
+            unit.scripts.push_back(std::move(st));
             continue;
         }
         if (p.isIdent("typedef")) {  // main-spec §4.5

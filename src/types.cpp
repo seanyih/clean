@@ -342,10 +342,15 @@ TypeResolution applyDeclarator(Type base, int star, int brackets, bool isParam) 
     if (base.kind == Type::Kind::Unit)
         return e101("`void *` is a pointer to nothing in particular", "main-spec §4.6 accepts only array "
                     "parameters and `char *`.", "use an array parameter or a return value.");
+    if (isChar && star == 1 && brackets > 0) {  // `const char *names[N]`: an array of strings (G19)
+        Type t = Type::of(Type::Kind::String);
+        for (int k = 0; k < brackets; ++k) t = Type::arrayOf(t);
+        return good(t);
+    }
     if (star > 1 || (star && brackets))
         return e101("pointer-to-pointer or array-of-pointers declarator",
                     "main-spec §4.6 accepts only `T *a` as an array parameter and `char *` as a string.",
-                    "use `T a[]` for arrays; arrays of strings are not translated yet.");
+                    "use `T a[]` for arrays, and `const char *a[N]` for an array of strings.");
     if (isChar) {
         if (star == 1 || brackets == 1) return good(Type::of(Type::Kind::String));
         return bad("an array of strings is not translated yet", "`char a[M][N]` would be an `Array String`.",

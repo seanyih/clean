@@ -41,7 +41,7 @@ set_option linter.unusedSimpArgs false in
 theorem clamp_step_eq_clamp_spec : ∀ (a : byte), clamp_step a = clamp_spec a := by
   intro a
   try simp only [clamp_step, clamp_spec, Id.run, pure, bind]
-  all_goals bv_decide
+  all_goals first | bv_decide | ((repeat' split) <;> bv_decide)
 
 -- c: verify.c:25
 -- a label names the theorem; several variables; an `&&` chain proves every conjunct

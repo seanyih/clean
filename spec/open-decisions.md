@@ -74,4 +74,14 @@ Taken while building the 2026-11 feature commits (`?:` through the catalogue cod
 | One variable per declaration | `int a, b;` is refused with a fix (each declarator would be its own `let`); struct fields do allow `double w, h;`. | src/parser.cpp |
 | Test hooks | `NAME.flags` (extra flags) and `NAME.before.lean` (the Lean side of `extern`s) in test/cases. | test/run_e2e.sh |
 
+Taken while closing the cheap gaps of the book walkthrough (manual/fp-in-lean, 2026-11-05); they stand unless you veto:
+
+| What | Decision | Where |
+| ---- | -------- | ----- |
+| Arrays of strings | `const char *a[N]` and `char *a[]` are `Array String` everywhere (constants, locals, parameters, fields), not only `argv`. `char **p` stays refused. | impl-spec.md "Strings", src/types.cpp `applyDeclarator` |
+| Compound literals | `(struct P){…}` is accepted for struct types only, in any expression; the anonymous form is emitted with its type, `(⟨…⟩ : P)`, so it works where Lean cannot infer one (`(⟨1, 2⟩ : P).x`). | impl-spec.md "Structs", src/parser.cpp `parseUnary` |
+| File-scope calls | `f(x);` at file scope is `#eval f x` (script mode, main-spec §8.2 extended from `printf` to any `void` call). OD5 (where script mode is allowed) applies to it too. | impl-spec.md "I/O", src/parser.cpp |
+| `fflush`, `strcpy` | `fflush(f)` is `f.flush` (same statement as `fclose`); `strcpy(dst, src);` is `dst := src`, a statement like `strcat`. | impl-spec.md "Input and files", "The pure C library" |
+| `VERIFY_FORALL` proof script | when a `do` block was unfolded, `all_goals first \| bv_decide \| ((repeat' split) <;> bv_decide)`; the split is tried only after `bv_decide` fails, so passing theorems keep the short path and a false claim still gets a counterexample. | impl-spec.md "Theorems", src/emitter.cpp `emitVerify` |
+
 Suggested next slices are a plan, not decisions; they live in impl-spec.md.

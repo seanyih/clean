@@ -70,6 +70,7 @@ enum class StdShape {
     StrLen,    // size_t strlen(s)
     StrCmp,    // int strcmp(a, b)        -1 / 0 / 1 (a generated helper)
     StrCat,    // strcat(dst, src)        a statement: `dst := dst ++ src`
+    StrCpy,    // strcpy(dst, src)        a statement: `dst := src`
     CharTest,  // bool f(char)            isdigit isalpha isalnum isspace isupper islower (C: int)
     CharMap,   // char f(char)            toupper tolower
     Assert,    // assert(c)               a statement: `assert! c`

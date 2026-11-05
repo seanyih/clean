@@ -195,6 +195,9 @@ void emitCall(const Expr& e, std::string& out) {
             out += convert(Type::of(Type::Kind::Nat), Type::of(Type::Kind::Int), "(Int.natAbs " + x + ")", nullptr, nullptr);
             return;
         }
+        case StdShape::StrCpy:  // `strcpy(dst, src)` → `src` (the statement assigns it to `dst`)
+            emitChild(e.kids[1], 0, false, out);
+            return;
         case StdShape::StrCat:  // `strcat(dst, src)` → `dst ++ src`
             emitChild(e.kids[0], 65, false, out);
             out += " ++ ";
@@ -250,7 +253,11 @@ void emitExpr(const Expr& e, std::string& out) {
         out += "]!";
         return;
     case Expr::Kind::ArrayLit:
-        if (e.type.kind == Type::Kind::Struct) out += structLit(e, e.type);  // a struct initialiser
+        if (e.type.kind == Type::Kind::Struct) {  // a struct initialiser
+            const std::string lit = structLit(e, e.type);
+            // a compound literal may stand where Lean cannot infer the type (`(⟨1, 2⟩ : P).x`)
+            out += e.compound && lit.rfind("⟨", 0) == 0 ? "(" + lit + " : " + leanName(e.type) + ")" : lit;
+        }
         return;  // an array one is printed by arrayInit
     case Expr::Kind::BvLit:
         out += e.text + "#" + std::to_string(e.type.width);
@@ -638,6 +645,15 @@ bool isBareEval(const Stmt& s) {
 // `#eval …` for one file-scope statement. An I/O call inside needs a `do` to run it.
 void emitScript(const Stmt& s, std::string& out) {
     emitComments(s.comments, "", out);
+    if (s.kind == Stmt::Kind::CallStmt) {  // `f(x);` at file scope → `#eval f x` (it runs an `IO` function)
+        bool io = false;
+        for (const Expr& a : s.expr.kids) io = io || hasIOCall(a);
+        std::string call;
+        if (s.expr.io) emitCall(s.expr, call);
+        else emitExpr(s.expr, call);
+        out += io ? "#eval do\n  " + call + "\n" : "#eval " + call + "\n";
+        return;
+    }
     if (isBareEval(s)) {
         out += "#eval " + convText(s.pieces[0], s.args[0], false) + "\n";
         return;
@@ -1088,7 +1104,11 @@ void emitVerify(const Verify& v, const TranslationUnit& unit, std::string& out) 
         if (needId) out += ", Id.run, pure, bind";
         out += "]\n";
     }
-    out += "  all_goals bv_decide\n";
+    // An early `return` in a `do` body unfolds to an `if` whose branches are `UIntN`/`IntN`
+    // values; `bv_decide` treats such an `ite` as opaque and reports a spurious counterexample.
+    // Splitting the `if`s first gives it plain bit-vector goals.
+    if (needId) out += "  all_goals first | bv_decide | ((repeat' split) <;> bv_decide)\n";
+    else out += "  all_goals bv_decide\n";
 }
 
 }  // namespace

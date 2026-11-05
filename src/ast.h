@@ -54,6 +54,7 @@ struct Expr {
     Type type;  // the C type of the value; set by check.cpp (parser: Cast target, BvLit width)
     bool implicit = false;  // Cast: inserted by check.cpp, not written in the C source
     bool io = false;        // Call: the callee does I/O, so Lean needs `(← f x)` (check.cpp)
+    bool compound = false;  // ArrayLit: a C99 compound literal `(T){ … }`; `type` is T (parser)
     bool lib = false;       // Call: a pure C library function of main-spec §12, spelled by builtins.h `stdSpelling`
     std::vector<std::string> fields;  // ArrayLit as a struct initialiser: `.x =` designators, one per kid
 };

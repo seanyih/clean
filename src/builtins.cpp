@@ -9,7 +9,7 @@ LibName classifyLibName(const std::string& name) {
     if (name == "exit") return LibName::Exit;
     if (name == "scanf" || name == "fscanf") return LibName::Scan;
     if (name == "fgets") return LibName::ReadLine;
-    if (name == "fclose") return LibName::Close;
+    if (name == "fclose" || name == "fflush") return LibName::Close;
     if (name == "getchar" || name == "fgetc" || name == "getc" || name == "fopen") return LibName::Value;
     if (name == "bv_cat" || name == "bv_ext" || name == "bv_bit" || name == "bv_zext" || name == "bv_sext" ||
         name == "bv_rotl" || name == "bv_rotr" || name == "bv_slt" || name == "bv_sle" || name == "bv_ult" ||
@@ -105,6 +105,7 @@ const std::map<std::string, StdRow>& stdTable() {
         m["strlen"] = {StdShape::StrLen, "String.length"};
         m["strcmp"] = {StdShape::StrCmp, "strcmp"};
         m["strcat"] = {StdShape::StrCat, "++"};
+        m["strcpy"] = {StdShape::StrCpy, ":="};
         // <ctype.h> (§12.4)
         m["isdigit"] = {StdShape::CharTest, "Char.isDigit"};
         m["isalpha"] = {StdShape::CharTest, "Char.isAlpha"};

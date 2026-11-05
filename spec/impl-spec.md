@@ -182,7 +182,12 @@ label before it, else `f_eq_g` for `f(…) == g(…)`, else `verify_LINE`. The p
 unfolds every function and constant of the file the statement reaches,
 transitively (`bv_decide` treats a definition it cannot see into as an unknown,
 main-spec §9.2), plus `Id.run`, `pure`, `bind` when one of them is a `do` block,
-then runs `bv_decide`, whose SAT certificate Lean checks. `import
+then runs `bv_decide`, whose SAT certificate Lean checks. When a `do` block was
+unfolded, the last line is `all_goals first | bv_decide | ((repeat' split) <;>
+bv_decide)`: an early `return` unfolds to an `if` whose branches are `UIntN`/`IntN`
+values, which `bv_decide` abstracts as an unknown (a *spurious* counterexample);
+splitting the `if`s first leaves plain bit-vector goals
+(`test/cases/verify_do.c`). `import
 Std.Tactic.BVDecide` heads the file only when a theorem is generated. The
 theorems come after the functions. **A false claim is not hidden:** the file
 translates, and Lean rejects it with a counterexample
@@ -284,6 +289,7 @@ write their own `min`). Arguments convert as for any call (D19).
 | `strlen(s)`                                    | `String.length s` (a `Nat`; characters, not bytes) |
 | `strcmp(a, b)`                                 | `strcmp a b`: a generated helper, -1 / 0 / 1 |
 | `strcat(dst, src);` (a statement)              | `dst := dst ++ src`                         |
+| `strcpy(dst, src);` (a statement)              | `dst := src`                                |
 | `isdigit isalpha isalnum isspace isupper islower` | `Char.isDigit c` … — a `bool` (C: `int`) |
 | `toupper tolower`                              | `Char.toUpper c`, `Char.toLower c`          |
 | `assert(c);`                                   | `assert! c'` — a run-time check (it panics), not a proof |
@@ -327,8 +333,10 @@ one `void` function that does something observable is the **array writer**
 parameters, locals initialised from a literal (`char s[] = "abc";`), indexing
 (`s.toList[i]!`, lint W011). `==` and `!=` compare the contents; a string as a
 test means "non-empty". Refused: writing through an index (**E101**, §4.3),
-`+`, `<`, `>`, arrays of strings, `char a[N]` without a string literal. Not
-built: the `<string.h>` helpers (`strlen`, `strcmp`, `strcat`, …).
+`+`, `<`, `>`, `char a[N]` without a string literal, `char a[M][N]`.
+**Arrays of strings** are `const char *a[N]` / `char *a[]` (also as parameters and
+struct fields): an `Array String` like any other array (`test/cases/string_array.c`).
+The `<string.h>` helpers are under "The pure C library" below.
 
 **Arrays** (§4.4, D13: every C array is an `Array`; the size is not part of
 the type). `T a[N] = {1, 2, 3}` is `#[1, 2, 3]`; a shorter list is padded like
@@ -405,7 +413,10 @@ call on the right of `&&`/`||` (C short-circuits, `(← …)` would not).
 holes becomes `IO.println` (as the §8.2 table does: `#eval IO.println
 s!"v={f 3}"`). `#eval` output appears when Lean checks the file, not when a
 program runs. If an argument calls an `IO` function the statement becomes
-`#eval do …`.
+`#eval do …`. A **call of a file function** at file scope, `countdown(3);`, is
+`#eval countdown 3` (the function is usually an `IO` one that prints); a call
+whose result is not `void` is refused with the fix "print it"
+(`test/cases/file_scope_call.c`).
 
 **Input and files** (main-spec §8.1 🟡 rows, §12.6; slice 9). Everything that
 reads or touches a stream is `IO`, exactly like printing. `FILE *` is the type
@@ -419,7 +430,7 @@ variable (`FILE *e = stderr;`).
 | `fgets(s, n, f);`                          | `s ← fgets f n s`                                         |
 | `int c = getchar();` / `fgetc(f)` / `getc` | `(← getchar)` / `(← fgetc f)` (an `Int`, `-1` = `EOF`)    |
 | `FILE *f = fopen(path, "w");`              | `let f : IO.FS.Stream := (← fopen path "w")`              |
-| `fclose(f);`                               | `f.flush`                                                 |
+| `fclose(f);`, `fflush(f);`                 | `f.flush` (`fflush(stdout)` → `(← IO.getStdout).flush`)   |
 | `fprintf(f, …);` `fputs(s, f);` `fputc(c, f);` | `f.putStr …` / `f.putStrLn …` / `f.putStr c.toString`  |
 | `sprintf(buf, …);`                         | `buf := s!"…"` (not `IO`; a final `\n` is kept)           |
 | `snprintf(buf, n, …);`                     | `buf := ((s!"…").take (n - 1)).toString` (cut to n-1)     |
@@ -468,6 +479,7 @@ its declared size for its zero, and `char name[16]` is a `String`.
 | ---------------------------------- | ------------------------------------------------- |
 | `p.x`, `a[i].x`, `f(p).x`          | `p.x`, `a[i]!.x`, `(f p).x`                       |
 | `struct P p = {1, 2};` (complete)  | `let p : P := ⟨1, 2⟩`                             |
+| `(struct P){1, 2}` (compound literal, any expression) | `(⟨1, 2⟩ : P)`; partial / designated: `{ x := 1, y := 0 : P }` |
 | `{.x = 1}`, `{1}` (partial)        | `{ x := 1, y := 0 : P }` — missing fields are zero |
 | `struct P p;`                      | every field zero, spelled out (`default` would leave array fields empty) |
 | `p.x = 5;`  `p.q.y += 1;`          | `p := { p with x := 5 }`  `p := { p with q := { p.q with y := p.q.y + 1 } }` |
@@ -549,7 +561,7 @@ cannot (see `cases-lean-rejects`).
 Not translated yet (each is a hard error with location + why + fix):
 several declarators in one declaration (`int a, b;`),
 `goto` and labels (**E102** — permanent, main-spec §6),
-unions, compound literals (`(struct P){1, 2}`), `strcpy`/`memcpy`/`memset`,
+unions, compound literals of non-struct types (`(int){1}`, `(int[]){…}`), `memcpy`/`memset`, `strncpy`,
 `fmod`/`hypot`/`lround`, `switch` on types
 other than `int`/`unsigned`, `fopen` update modes, `fread`/`fwrite`/`fseek`,
 `atoi`/`strtol`, other attributes, preprocessor expansion (`#define` names are recorded; **using**
