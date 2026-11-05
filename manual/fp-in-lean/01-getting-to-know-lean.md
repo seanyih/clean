@@ -8,7 +8,7 @@ Legend and gap IDs (`G1`, `G2`, …): see [README.md](README.md).
 | 1.1 Evaluating Expressions | ✅ (partial application ❌ G5) |
 | 1.2 Types | ✅ / `#check` 🟡 via raw Lean |
 | 1.3 Functions and Definitions | ✅ (`def` vs `abbrev` for types 🟡 G9) |
-| 1.4 Structures | ✅ (methods / function-valued fields ❌ G5, custom constructor name ❌ G10) |
+| 1.4 Structures | ✅ incl. compound literals (methods / function-valued fields ❌ G5, custom constructor name ❌ G10) |
 | 1.5 Datatypes and Patterns | 🟡 enums, `switch` and recursion ✅; constructors with payloads ❌ G3 |
 | 1.6 Polymorphism | ❌ G4 `List`/`Option`/`Prod`/`Sum` are written out as Lean; concrete C stand-ins given where possible |
 | 1.7 Characters, Strings, and Slices | 🟡 `strlen`, `<ctype.h>`; slices ❌ G8 |
@@ -205,8 +205,7 @@ const Point origin = {0.0, 0.0};
 printf("%f", origin.x);                 /* #eval origin.x → 0.000000 */
 
 Point addPoints(Point p1, Point p2) {
-  Point r = {p1.x + p2.x, p1.y + p2.y};
-  return r;
+  return (Point){p1.x + p2.x, p1.y + p2.y};      /* a C99 compound literal */
 }
 
 double distance(Point p1, Point p2) {
@@ -225,22 +224,20 @@ The book's `{ x := 1.5, y := 32 }` becomes a C initialiser; both positional
 const Point fourAndThree = {.x = 4.3, .y = 3.4};
 ```
 
-<!-- clean: skip -->
-```c
-printf("%f", distance((Point){1.0, 2.0}, (Point){5.0, -1.0}));   /* REJECTED: compound literal */
-```
-
-> The line above is the book's `#eval distance { x := 1.0, y := 2.0 } { x := 5.0, y := -1.0 }`.
-> It is **rejected**: compound literals `(Point){…}` are not in the supported
-> subset (**G6**: a struct value can only be built by declaring a variable).
-> The accepted spelling is:
+The book's `#eval distance { x := 1.0, y := 2.0 } { x := 5.0, y := -1.0 }` and
+`#eval addPoints { x := 1.5, y := 32 } { x := -8, y := 0.2 }` build structures in
+place; in C that is a **compound literal** `(Point){…}` (positional or designated).
+Clean emits `(⟨1.0, 2.0⟩ : Point)`, with the type written so that Lean never has
+to guess it:
 
 <!-- clean: continue -->
 ```c
-const Point p1 = {1.0, 2.0};
-const Point p2 = {5.0, -1.0};
-printf("%f", distance(p1, p2));        /* 5.000000 */
+printf("%f", distance((Point){1.0, 2.0}, (Point){5.0, -1.0}));     /* 5.000000 */
+printf("%f", addPoints((Point){1.5, 32}, (Point){-8, 0.2}).x);     /* -6.500000 */
 ```
+
+(✅ since gap **G6** was closed; before, the values had to be declared as
+variables first.)
 
 ### Updating a structure
 
@@ -291,11 +288,12 @@ C function that fixes the function (`floor`) is the available workaround:
 
 <!-- clean: continue -->
 ```c
-Point floorBoth(Point p) {
-  Point q = {floor(p.x), floor(p.y)};
-  return q;
-}
+Point floorBoth(Point p) { return (Point){floor(p.x), floor(p.y)}; }
 ```
+
+(The design for methods and function parameters in C++ style —
+`Point modifyBoth(std::function<double(double)> f) const` — is in
+[spec/cpp-front-end-design.md](../../spec/cpp-front-end-design.md) §3.1, §9.)
 
 ```lean
 structure Point where
@@ -741,14 +739,29 @@ left undone:
 ### Pattern-matching definitions → `switch` / `if`
 
 `def even : Nat → Bool | 0 => true | n + 1 => not (even n)` is the same C
-`even` as in 1.5; `halve` with the `n + 2` pattern:
+`even` as in 1.5. `halve` with the `n + 2` pattern is a test and a subtraction:
 
 ```c
 unsigned halve(unsigned n) {
+  if (n < 2) return 0;               /* | 0 => 0  | 1 => 0 */
+  return halve(n - 2) + 1;           /* | n + 2 => halve n + 1 */
+}
+```
+
+🟡 **G29.** The `switch` spelling translates but **Lean rejects it**: in
+`match n with | 0 | 1 => … | _ => halve (n - 2) + 1` the `_` arm does not know that
+`n ≥ 2`, so Lean cannot prove `n - 2 < n` and the recursion does not terminate in
+its eyes. With `if (n < 2)` the condition is a hypothesis in the `else` branch
+and the proof goes through. (Lean's own `| n + 2 =>` pattern would be the fix;
+Clean does not emit it yet.)
+
+<!-- clean: lean-rejects -->
+```c
+unsigned halveSwitch(unsigned n) {
   switch (n) {
     case 0:
     case 1:  return 0;
-    default: return halve(n - 2) + 1;
+    default: return halveSwitch(n - 2) + 1;   /* Lean: fail to show termination */
   }
 }
 ```

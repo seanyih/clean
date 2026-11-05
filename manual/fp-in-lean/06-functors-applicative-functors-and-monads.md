@@ -2,6 +2,8 @@
 
 Book chapter: <https://lean-lang.org/functional_programming_in_lean/Functors___-Applicative-Functors___-and-Monads/>
 Legend and gap IDs: see [README.md](README.md).
+C/C++-style syntax for what this chapter misses is designed (not built) in
+[spec/cpp-front-end-design.md](../../spec/cpp-front-end-design.md): §3.3 (default member initialisers), §3.4 (`struct B : A` → `extends`, with `virtual` bases for shared parents) and §10.
 
 Almost the whole chapter is *abstraction over type constructors* (`Functor`,
 `Applicative`, `Alternative`, universe levels). Clean has none of that (**G20**,

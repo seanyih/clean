@@ -423,9 +423,9 @@ translate.
 
 ### Running `IO` actions with `#eval`
 
-Only `printf`/`puts`/… are allowed as file-scope statements (they become
-`#eval`). Calling a user-defined action at file scope is **not** supported
-(**G17**); raw Lean is the escape hatch:
+A call of your own function at file scope is `#eval`, like a file-scope `printf`
+(main-spec §8.2): it runs when Lean checks the file. This is the book's
+`#eval runActions (countdown 3)`:
 
 ```c
 #include <stdio.h>
@@ -435,8 +435,12 @@ void countdown(unsigned n) {
   puts("Blast off!");
 }
 
-LEAN_DECL("#eval countdown 3");
+countdown(3);              /* #eval countdown 3 — prints 3 2 1 Blast off! */
 ```
+
+(✅ since gap **G17** was closed; before, it needed `LEAN_DECL("#eval countdown 3");`.)
+A call whose result is not `void` is still refused at file scope — print it with
+`printf("%d", f(…))`, which is `#eval f …`.
 
 ```lean
 #eval runActions (countdown 3)

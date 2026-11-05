@@ -2,6 +2,8 @@
 
 Book chapter: <https://lean-lang.org/functional_programming_in_lean/Monad-Transformers/>
 Legend and gap IDs: see [README.md](README.md).
+C/C++-style syntax for what this chapter misses is designed (not built) in
+[spec/cpp-front-end-design.md](../../spec/cpp-front-end-design.md): §3.1 (methods such as `cfg.inDirectory()`), §3.3 (`Config`'s defaults), §5.3 and §10.
 
 Monad transformers (`ReaderT`, `OptionT`, `ExceptT`, `StateT`) stack *effects*
 (configuration, failure, errors, state) on top of `IO`. In C there is no stacking
@@ -618,6 +620,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
   puts("How would you like to be addressed?");
+  fflush(stdout);                                   /* stdout.flush */
   fgets(name, 100, stdin);
   if (strcmp(name, "") == 0) {
     fprintf(stderr, "No name provided\n");
@@ -628,7 +631,8 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-(`stdout.flush` has no Clean spelling; `fflush` is **not** supported — **G25**.)
+(`fflush(stdout)` is `(← IO.getStdout).flush` — ✅ since gap **G25**'s `fflush`
+part was closed. Byte-chunk reads (`fread`) are still missing.)
 
 ### Early exit from a search: `List.find?`
 
@@ -717,7 +721,7 @@ int main(int argc, char *argv[]) {                  /* forM (LinesOf.mk stdin) �
   fgets(line, 256, stdin);
   while (strcmp(line, "") != 0) {
     if (anyAlpha(line)) printf("%s", line);
-    line = "";                                      /* fgets leaves the old text at end of input */
+    strcpy(line, "");                               /* fgets leaves the old text at end of input */
     fgets(line, 256, stdin);
   }
   return 0;

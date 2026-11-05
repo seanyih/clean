@@ -130,11 +130,20 @@ unsigned plusR(unsigned n, unsigned k) {
   return plusR(n, k - 1) + 1;
 }
 
-LEAN_DECL("theorem plusR_zero_left (k : Nat) : k = plusR 0 k := by induction k <;> simp [plusR] <;> assumption");
+LEAN_DECL("theorem plusR_zero_left (k : Nat) : k = plusR 0 k := by\n"
+          "  induction k with\n"
+          "  | zero => rw [plusR]; rfl\n"
+          "  | succ n ih =>\n"
+          "    rw [plusR]\n"
+          "    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]\n"
+          "    exact congrArg (· + 1) ih");
 ```
 
 (Written after the function, `LEAN_DECL` text lands at the end of the file, where it
-may mention the functions — main-spec "Raw Lean".)
+may mention the functions — main-spec "Raw Lean". The proof is not the book's
+one-liner: Clean emits `plusR` as an `Id.run do` block with an early `return`, so
+`simp [plusR]` alone loops; unfolding once with `rw [plusR]` and simplifying the
+`if` works. Proofs about generated `do` code are one more reason G27 is open.)
 
 ---
 

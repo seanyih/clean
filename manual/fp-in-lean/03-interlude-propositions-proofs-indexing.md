@@ -31,13 +31,11 @@ bounds proof (`woodlandCritters[3]` is rejected by the elaborator) does not
 exist in C (**G18**).
 
 ```c
-typedef const char *Str;                 /* an array of strings needs a typedef (G19) */
+const char *woodlandCritters[3] = {"hedgehog", "deer", "snail"};   /* Array String */
 
-const Str woodlandCritters[3] = {"hedgehog", "deer", "snail"};
-
-const Str hedgehog = woodlandCritters[0];
-const Str deer     = woodlandCritters[1];
-const Str snail    = woodlandCritters[2];
+const char *hedgehog = woodlandCritters[0];
+const char *deer     = woodlandCritters[1];
+const char *snail    = woodlandCritters[2];
 ```
 
 `#eval woodlandCritters[1]!`:
@@ -186,9 +184,7 @@ a proof obligation, main-spec §12.5):
 ```c
 #include <assert.h>
 
-typedef const char *Str;
-
-Str third(Str xs[], unsigned n) {
+const char *third(const char *xs[], unsigned n) {
   assert(n > 2);
   return xs[2];
 }

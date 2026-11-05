@@ -149,7 +149,10 @@ maxEq: VERIFY_FORALL(uint8_t a, uint8_t b) { maxA(a, b) == maxB(a, b); }
 ```
 
 generates `theorem maxEq : ∀ (a b : UInt8), maxA a b = maxB a b` with the functions
-unfolded and `bv_decide` as the last step. A recursion on an unbounded `unsigned`
+unfolded and `bv_decide` as the last step. (`maxB`'s early `return` unfolds to an
+`if` on `UInt8` values, which `bv_decide` used to treat as opaque — a *spurious*
+counterexample. Clean now splits such `if`s before calling `bv_decide`; Lean
+accepts the theorem.) A recursion on an unbounded `unsigned`
 (like `nonTailFactorial`) cannot be a `VERIFY_FORALL` binder.
 
 ### ❌ The induction proofs (G27)
@@ -507,7 +510,7 @@ int main(int argc, char *argv[]) {
   while (strcmp(cur, "") != 0) {
     lines[count] = cur;
     count++;
-    cur = "";
+    strcpy(cur, "");
     fgets(cur, 256, stdin);
   }
 

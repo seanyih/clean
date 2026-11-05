@@ -2,6 +2,8 @@
 
 Book chapter: <https://lean-lang.org/functional_programming_in_lean/Monads/>
 Legend and gap IDs: see [README.md](README.md).
+C/C++-style syntax for what this chapter misses is designed (not built) in
+[spec/cpp-front-end-design.md](../../spec/cpp-front-end-design.md): §5 (tagged unions, `std::optional` → `Option`, `std::expected` → `Except`, the book's `evaluate`) and §10 (`co_await` as `←`).
 
 The chapter's thesis is that "stop at the first failure", "collect a log", and
 "thread a counter" are *patterns of sequencing* that the `Monad` type class

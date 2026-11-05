@@ -104,8 +104,8 @@ int main(void) {
 ```
 
 (The book's example zips `["Mount Hood", "Mount Jefferson", "South Sister"]` with
-`["Møllehøj", "Yding Skovhøj", "Ejer Bavnehøj"]`; arrays of strings need the `Str`
-typedef, G19.)
+`["Møllehøj", "Yding Skovhøj", "Ejer Bavnehøj"]`. `Str xs[]` with
+`typedef const char *Str;` and plain `const char *xs[]` are the same `Array String`.)
 
 ### Clean's dependent type: `bv(N)`
 

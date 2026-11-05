@@ -2,6 +2,8 @@
 
 Book chapter: <https://lean-lang.org/functional_programming_in_lean/Overloading-and-Type-Classes/>
 Legend and gap IDs: see [README.md](README.md).
+C/C++-style syntax for what this chapter misses is designed (not built) in
+[spec/cpp-front-end-design.md](../../spec/cpp-front-end-design.md): §6 (trait templates = classes, specialisations = instances) and §7 (operator overloading → `Add`, `Mul`, `ToString`, `Ord`, `GetElem`, `Coe`, `OfNat`, `Hashable`).
 
 This chapter is the **widest gap** between C and Lean so far: type classes are
 Lean's overloading mechanism, and C has none (C++ would, main-spec §15 🔮). Clean
@@ -297,9 +299,7 @@ instance [Add α] : HPlus α α α where
 ## 3.4 Arrays and Indexing
 
 ```c
-typedef const char *Str;
-
-const Str northernTrees[4] = {"sloe", "birch", "elm", "oak"};
+const char *northernTrees[4] = {"sloe", "birch", "elm", "oak"};    /* Array String */
 ```
 
 `NonEmptyList α` (a head and a `List` tail) is a struct with a *fixed-size* array

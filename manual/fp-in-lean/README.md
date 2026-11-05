@@ -7,7 +7,7 @@ It is written for a reader who already programs in C/C++ and wants to see, for e
 part of the book, **what Clean can already do** and **what is still missing**.
 
 * Every **` ```c `** block is a Clean program that `release/clean` accepts.
-  `check.py` proves it (113 blocks today).
+  `check.py` proves it (114 blocks today, each also type-checked by Lean 4.35.0).
 * Every **` ```lean `** block is the book's *original* Lean for a part Clean cannot
   express yet. Those blocks are the gap, kept verbatim so the missing feature is
   visible. They are always under a **❌** heading or inside a **🟡** section that
@@ -56,10 +56,11 @@ make                                  # builds release/clean
 python3 manual/fp-in-lean/check.py    # translates every ```c block; non-zero exit on a rejection
 ```
 
-`check.py` only proves that Clean **translates** each block. Lean itself is not
-installed in the environment where this manual was written, so the generated
-`.lean` files were not type-checked by Lean here; the repository's own end-to-end
-tests (`make test`) do that for `test/cases` when `lean` is available.
+With `lean` on `PATH`, `check.py` also **type-checks** every translation, as
+`make test` does for `test/cases`; without it the Lean step is skipped and the
+script says so. Today all 114 blocks translate and type-check with Lean 4.35.0;
+one of them is marked `<!-- clean: lean-rejects -->` because it demonstrates a
+program Lean must refuse (G29).
 
 ---
 
@@ -68,9 +69,11 @@ tests (`make test`) do that for `test/cases` when `lean` is available.
 Everything a C programmer needs for the book's first two chapters and the
 imperative half of the later ones: functions and recursion on `int`/`unsigned`/
 `bool`/`double`/`char`/strings; `struct` (nested, positional and designated
-initialisers, field update), `enum` + `switch`, `typedef`; arrays (read, write,
-`D20` in-place writers, 2-D); `if`/`for`/`while`/`do`/`break`/`continue`/early
-`return`; `printf`/`scanf`/`fgets`/`fgetc`/`FILE *`/`argc, argv`/`exit`;
+initialisers, compound literals `(P){…}`, field update), `enum` + `switch`,
+`typedef`; arrays (read, write, `D20` in-place writers, 2-D, arrays of strings);
+`if`/`for`/`while`/`do`/`break`/`continue`/early `return`;
+`printf`/`scanf`/`fgets`/`fgetc`/`fflush`/`strcpy`/`FILE *`/`argc, argv`/`exit`;
+file-scope calls as `#eval`;
 `#pragma lean namespace`; `[[lean::partial]]`; raw Lean through `LEAN_DECL`,
 `LEAN_STMT`, `LEAN_EXPR`; and Clean's own contributions: `bv(N)` and
 `VERIFY_FORALL` (a generated `theorem` closed by `bv_decide`).
@@ -82,36 +85,45 @@ Each row is one missing capability, with the C-side workaround that exists today
 (`spec/main-spec.md`, `spec/open-decisions.md`). They are ordered by how much of the
 book depends on them (the number of references in this folder).
 
+**A design for the big ones** — type classes, operator and function overloading,
+constructors and methods, inheritance, templates, sum types, `std::optional` /
+`std::expected`, lambdas — written in C/C++ syntax is in
+[spec/cpp-front-end-design.md](../../spec/cpp-front-end-design.md) ("Clean++",
+not built yet; the § numbers in the *Spec status* column point into it).
+Rows marked **✅ closed** were fixed in the translator and the chapters now use
+the feature.
+
 | ID | Missing | Workaround today | Blocks | Spec status |
 | --- | --- | --- | --- | --- |
-| **G20** | **Type classes**: `class`, `instance`, overloaded operators (`+` on `Pos`), `ToString`/`Repr`/`BEq`/`Hashable` instances, coercion classes (`Coe`, `CoeFun`, …), `deriving` beyond the automatic one | named functions (`Pos_plus`), explicit conversion functions | ch. 3 (all), 4, 5, 6, 8 | 🔮 C++ / §11.3 "user type classes and instances" |
-| **G3** | **Recursive and tagged `inductive` types**: constructors with payloads, `Nat.succ n`, `List.cons`, `BinTree`, `Expr`, JSON | enums for payload-free constructors; a struct with a tag + all fields for a closed sum | ch. 1.5, 3, 4, 5, 8, tactics | 🔮 "tagged unions → `inductive` with payloads"; `union` is E104, pointers E101 |
-| **G5** | **Function values**: lambdas (`fun`, `·`), higher-order functions, partial application/currying, function-typed fields and parameters, `IO` actions as values | one C function per use; pass a flag/`enum` and `switch` | ch. 1, 2, 3, 4, 6, 7 | 🟡 "function-typed parameters" (E107 today) |
+| **G20** | **Type classes**: `class`, `instance`, overloaded operators (`+` on `Pos`), `ToString`/`Repr`/`BEq`/`Hashable` instances, coercion classes (`Coe`, `CoeFun`, …), `deriving` beyond the automatic one | named functions (`Pos_plus`), explicit conversion functions | ch. 3 (all), 4, 5, 6, 8 | 🔮 C++ / §11.3 "user type classes and instances"; **C++ design §6, §7** |
+| **G3** | **Recursive and tagged `inductive` types**: constructors with payloads, `Nat.succ n`, `List.cons`, `BinTree`, `Expr`, JSON | enums for payload-free constructors; a struct with a tag + all fields for a closed sum | ch. 1.5, 3, 4, 5, 8, tactics | 🔮 "tagged unions → `inductive` with payloads"; `union` is E104, pointers E101; **C++ design §5.1, §5.2** |
+| **G5** | **Function values**: lambdas (`fun`, `·`), higher-order functions, partial application/currying, function-typed fields and parameters, `IO` actions as values | one C function per use; pass a flag/`enum` and `switch` | ch. 1, 2, 3, 4, 6, 7 | 🟡 "function-typed parameters" (E107 today); **C++ design §9** |
 | **G18** | **Proofs as values**: custom `theorem`s, evidence arguments (`ok : xs.length > 2`), refinement types `{x // p x}`, `Fin n` indices, propositions as datatypes | `assert(...)` (a run-time `assert!`), `VERIFY_FORALL` for finite domains, `LEAN_DECL` for raw theorems | interlude 1, ch. 3, 5, 7, 8 | ⛔ by design D11 ("generated theorems are the only proof content") |
-| **G21** | **Higher-kinded polymorphism**: `Functor`/`Applicative`/`Monad`, `ReaderT`/`StateT`/`ExceptT`/`OptionT`, custom `do` monads | the underlying patterns as plain C (early return, struct accumulators, passing state) | ch. 4, 5, 6 | 🔮 "monad stacks and transformers" |
+| **G21** | **Higher-kinded polymorphism**: `Functor`/`Applicative`/`Monad`, `ReaderT`/`StateT`/`ExceptT`/`OptionT`, custom `do` monads | the underlying patterns as plain C (early return, struct accumulators, passing state) | ch. 4, 5, 6 | 🔮 "monad stacks and transformers"; **C++ design §10** |
 | **G27** | **Writing proofs**: tactic choice, `induction`, `simp`, `rw`, `grind`, `fun_induction`; overriding the generated script | `VERIFY_FORALL` runs a fixed script (`intro …; try simp only […]; all_goals bv_decide`); `LEAN_DECL` carries a hand-written proof | tactics interlude, ch. 8 | 🟡 `[[lean::proof("…")]]` and `--prove=none` specified (§9.6), not built |
-| **G1** | **`Option` / `Except`**: a result that may be missing or an error with a message | a struct `{bool ok; T val;}` / `{ok, err, val}` and early `return` | ch. 1.6, 3.4, 4, 5, 6, 7.2, 8.3 | 🟡 v0.2 "`Option`/`Except` conventions for error-code returns" |
+| **G1** | **`Option` / `Except`**: a result that may be missing or an error with a message | a struct `{bool ok; T val;}` / `{ok, err, val}` and early `return` | ch. 1.6, 3.4, 4, 5, 6, 7.2, 8.3 | 🟡 v0.2 "`Option`/`Except` conventions for error-code returns"; **C++ design §5.3** |
 | **G7** | **Types that depend on values / type-level computation**: `Vect α n`, `Type`, universes, type families, `asType` pattern, typed queries | `bv(N)` (the width is in the type), fixed-size arrays with an explicit `n` | ch. 1.6, 5.5, 7 | 🔮 "dependent types and indexed families"; `Vector α n` 🟡 v0.2 |
 | **G12** | **`List`** (and `Vector`): linked lists, `::`, `[]` patterns, list-based exercises | an `Array` plus a length, fixed-size array fields | ch. 1.6, 3.4, 4, 8 | D13 (every array is an `Array`); `List` 🟡 "for linked structures" |
-| **G4** | **Polymorphism**: type parameters `{α : Type}`, constraints `[Ord α]`, `PPoint α` | one definition per concrete type | ch. 1.6, 3.2, 4.6, 8 | 🟡 v0.2 `GENERIC(T)` (OD4 still open) |
-| **G2** | **Tuples / `Prod`** and multiple return values | a named struct | ch. 1.6, 4, 5 | 🟡 v0.2 "tuples/out-parameters beyond the single-array case" |
+| **G4** | **Polymorphism**: type parameters `{α : Type}`, constraints `[Ord α]`, `PPoint α` | one definition per concrete type | ch. 1.6, 3.2, 4.6, 8 | 🟡 v0.2 `GENERIC(T)` (OD4 still open); **C++ design §4** |
+| **G2** | **Tuples / `Prod`** and multiple return values | a named struct | ch. 1.6, 4, 5 | 🟡 v0.2 "tuples/out-parameters beyond the single-array case"; **C++ design §5.4** |
 | **G8** | **String API**: slices (`drop`, `dropWhile`, `dropEndWhile`, `take`, `trim`), `String.push`, a char as a string, string concatenation as an *expression* | `strcat` as a statement, `strlen`, `s[i]`, `<ctype.h>` | ch. 1.7, 2.1, 6.2 | pointer arithmetic E101; string writes E101 (§4.3) |
 | **G15** | **File-system API**: `pathExists`, `readDir`, `isDir`, `currentDir`, paths; `fopen` returning `NULL` as a value | `fopen`/`fclose`/`fgetc`/`fgets` (a failing `fopen` stops the program, lint W016) | ch. 2.4, 6.1 | `IO.FS` 🟡 (§8.1); `NULL` handling an open decision |
 | **G24** | **Iteration protocol**: `for x in coll` over user types (`ForIn`/`ForM`), parallel `for x in xs, y in ys` | a C `for` with an index | ch. 6.4 | 🔮 (follows G20/G21) |
-| **G22** | **Structure inheritance with shared parents** (`extends A, B` with a common ancestor) and flattened initialisers | embed the parent as a field; copy fields of the second parent by hand | ch. 5.1 | not specified |
-| **G23** | **Default field values** (`large := size == Size.large`) | missing initialisers are zero; write the rest | ch. 5.1, 6.1 | not specified |
-| **G19** | **Arrays of strings** written as `const char *a[]` / `char *a[]` | `typedef const char *Str; Str a[N];` | ch. 3, 7 | E101 today ("arrays of strings are not translated yet"); looks like a small parser fix |
-| **G6** | **Struct-valued expressions**: compound literals `(Point){1.0, 2.0}` as arguments or return values | declare a variable first, then pass it | ch. 1.4 | not specified (parse error today) |
-| **G14** | **Binding patterns**: destructuring `let (a, b) := …`, `if let`, or-patterns that bind variables, struct patterns that bind fields | field access (`p.z`), tests, `switch` | ch. 1.8, 4.6 | follows G2/G3 |
-| **G17** | **Calling a user `IO` function at file scope** (`#eval countdown 3`) | only `printf`/`puts`/… become `#eval`; raw Lean via `LEAN_DECL("#eval …")` | ch. 2.5 | not specified |
-| **G25** | **More of `<stdio.h>`**: `fflush`, `fread`/byte chunks, `stdout.flush` | `fgetc`/`fgets`/`putchar` | ch. 2.4, 6.4 | §12.6 lists only `scanf`/files |
+| **G22** | **Structure inheritance with shared parents** (`extends A, B` with a common ancestor) and flattened initialisers | embed the parent as a field; copy fields of the second parent by hand | ch. 5.1 | not specified; **C++ design §3.4** |
+| **G23** | **Default field values** (`large := size == Size.large`) | missing initialisers are zero; write the rest | ch. 5.1, 6.1 | not specified; **C++ design §3.3 (OD15)** |
+| **G19** ✅ closed | **Arrays of strings** `const char *a[N]` / `char *a[]` — now an `Array String` everywhere (`test/cases/string_array.c`) | not needed (a `Str` typedef still reads well) | ch. 3, 7 | impl-spec "Strings"; provisional decision in open-decisions.md |
+| **G6** ✅ closed | **Compound literals** `(Point){1.0, 2.0}` in any expression — now `(⟨1.0, 2.0⟩ : Point)` (`test/cases/compound_literal.c`) | not needed | ch. 1.4 | impl-spec "Structs"; struct types only |
+| **G14** | **Binding patterns**: destructuring `let (a, b) := …`, `if let`, or-patterns that bind variables, struct patterns that bind fields | field access (`p.z`), tests, `switch` | ch. 1.8, 4.6 | follows G2/G3; **C++ design §5.4** |
+| **G17** ✅ closed | **Calling a file function at file scope** — `countdown(3);` is now `#eval countdown 3` (`test/cases/file_scope_call.c`) | not needed; a non-`void` result is printed with `printf` | ch. 2.5 | impl-spec "I/O" (script mode; OD5 applies) |
+| **G25** 🟡 partly closed | **More of `<stdio.h>`**: `fflush` ✅ now `f.flush` and `strcpy` ✅ now `dst := src` (`test/cases/flush_strcpy.c`); `fread`/byte chunks still missing | `fgetc`/`fgets`/`putchar` for reading | ch. 2.4, 6.4 | impl-spec "Input and files" |
 | **G13** | **More than one `namespace` per file**, `open … in` | `#pragma lean namespace` once per file | ch. 1.8 | §3.2 (one namespace) |
 | **G16** | **Multi-module projects** (`import`, lakefiles) | one `.c` → one `.lean`; `#include` of another `.c` | ch. 2.3 | n/a for v0.1 |
 | **G9** | `def` vs `abbrev` for type synonyms | `typedef` is always `abbrev` (so the failing `OfNat NaturalNumber 38` case cannot occur) | ch. 1.3 | by design |
-| **G10** | Custom constructor names (`point ::`) and dot-call method syntax (`p.f x`) | plain functions with a type-prefixed name | ch. 1.4 | by design (C has neither) |
+| **G10** | Custom constructor names (`point ::`) and dot-call method syntax (`p.f x`) | plain functions with a type-prefixed name | ch. 1.4 | by design (C has neither); **C++ design §3.1, §3.2** |
 | **G11** | Pattern variables such as `Nat.succ k`, `n + 2` | `n - 1`, `n - 2` after the test | ch. 1.5, 1.8 | by design |
 | **G26** | Type-error demonstrations (`#check` that fails) | Clean reports its own errors (`spec/error-codes.md`) | ch. 1.2 | n/a |
 | **G28** | Debug and reflection commands (`dbgTraceIfShared`, `#print`, `#check` on arbitrary terms) | `LEAN_DECL("#check …")`, `LEAN_STMT` | ch. 4.5, 8.6 | covered by the raw-Lean escape hatch |
+| **G29** | **Termination through `switch`**: a recursive call in the `default:` arm of a `switch` on `unsigned` (the book's `halve` with `\| n + 2 =>`) translates, but Lean cannot see that the excluded cases make `n - 2 < n` | write the test as an `if` (`if (n < 2) return 0; return halve(n - 2) + 1;`) | ch. 1.8 | not specified; fix: emit `\| n + 2 =>` patterns for a `default` after `case 0: case 1:` |
 
 ### Reading the register
 
@@ -120,10 +132,13 @@ book depends on them (the number of references in this folder).
   3–6; none of them has a C spelling, so they are the long-term 🔮 items rather
   than quick wins. Chapters 3–6 are still *mostly* readable in C because their
   examples are ordinary programs once the abstraction is dropped.
-* **Cheapest wins** (small, local changes to the translator): **G19** (accept
-  `const char *a[]`), **G6** (compound literals), **G17** (file-scope calls of
-  `IO` functions), **G25** (`fflush`), **G23** (default field values for partial
-  initialisers), **G8** (a few string helpers such as a trim and a char-to-string).
+* **Cheapest wins — done:** **G19** (arrays of strings), **G6** (compound
+  literals), **G17** (file-scope calls), **G25**'s `fflush` (plus `strcpy`), and a
+  `VERIFY_FORALL` bug the Lean check of this manual exposed (an early `return`
+  made `bv_decide` report a spurious counterexample). Still cheap but waiting:
+  **G23** default field values (the owner decides the C spelling, OD15), **G29**
+  (`n + 2` patterns), **G8** (a few string helpers such as a trim and a
+  char-to-string, which need a spelling first).
 * **Already planned** (v0.2, per main-spec §15): **G1** `Option`/`Except`,
   **G2** tuples and out-parameters, **G4** `GENERIC(T)`, **G5** function-typed
   parameters, **G12** `Vector`, **G27** tactic overrides. Implementing G1+G2+G5
